@@ -2,6 +2,8 @@ module github.com/exomind-tmi/whatsapp-mcp
 
 go 1.27.0
 
+toolchain go1.27.1
+
 require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds whatsapp-mcp for windows/amd64 and linux/amd64 into dist/.
+# Builds whatsapp-mcp into dist/: dist/windows-amd64/whatsapp-mcp.exe and
+# dist/linux-amd64/whatsapp-mcp, or only the OSes given (windows, linux).
 #
 # Version: $VERSION when set (CI passes the tag, e.g. v0.3.0); otherwise a dev
 # build v<next patch after the latest v* tag>-dev.<unix time>, so every rebuild
@@ -23,7 +24,12 @@ build() {
   CGO_ENABLED=0 GOOS=$1 GOARCH=amd64 go build -trimpath \
     -ldflags "-s -w -X main.version=$VERSION" -o "$2" ./cmd/whatsapp-mcp
 }
-build windows dist/windows-amd64/whatsapp-mcp.exe
-build linux dist/linux-amd64/whatsapp-mcp
-echo "$VERSION" >dist/VERSION
+[[ $# -gt 0 ]] || set -- windows linux
+for os in "$@"; do
+  case $os in
+    windows) build windows dist/windows-amd64/whatsapp-mcp.exe ;;
+    linux) build linux dist/linux-amd64/whatsapp-mcp ;;
+    *) echo "build.sh: unknown OS '$os' (windows, linux)" >&2; exit 1 ;;
+  esac
+done
 echo "$VERSION"

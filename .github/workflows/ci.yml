@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      # Includes tests/launcher: the launcher of this OS against a fake release.
+      - name: go test
+        run: go test ./...
+      - name: Cross builds
+        run: VERSION=v0.0.0-ci scripts/build.sh
+      - name: Plugin package is text only
+        run: scripts/plugin.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: THIRD_PARTY_NOTICES.md is up to date
+        run: scripts/notices.sh && git diff --exit-code THIRD_PARTY_NOTICES.md
+      - name: shellcheck
+        run: shellcheck plugin/scripts/launch-whatsapp-mcp scripts/*.sh
+      # Hosts copy file modes from git: without the bit Linux cannot start the
+      # server. The workflows run the scripts directly, too.
+      - name: Linux launcher and scripts are executable in git
+        run: |
+          bad=$(git ls-files -s plugin/scripts/launch-whatsapp-mcp 'scripts/*.sh' |
+            awk '$1 != "100755" { print $4 }')
+          [ -z "$bad" ] || { echo "::error::not 100755, run git update-index --chmod=+x on: $bad"; exit 1; }
+      # Binaries come only from GitHub Releases. grep -I skips binary files, so
+      # -L lists them, and empty files, which are fine.
+      - name: No binaries in git
+        run: |
+          bin=$(git ls-files -z | xargs -0 grep -IL -- . | while read -r f; do [ ! -s "$f" ] || echo "$f"; done || true)
+          [ -z "$bin" ] || { echo "::error::binary files in git:"; echo "$bin"; exit 1; }
+
+  powershell:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Windows PowerShell 5.1 is what the launcher runs under on users' PCs; it
+      # reads BOM-less scripts in the ANSI code page, hence the ASCII check.
+      - name: launch.ps1 is ASCII and parses in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $path = (Resolve-Path plugin/scripts/launch.ps1).Path
+          $bytes = [IO.File]::ReadAllBytes($path)
+          if ($bytes | Where-Object { $_ -gt 127 }) { throw "$path has non-ASCII bytes" }
+          $errors = $null
+          $null = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }
+      - name: PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Repository PSGallery -Scope CurrentUser -Force
+          $found = Invoke-ScriptAnalyzer -Path plugin/scripts/launch.ps1 -Severity Information, Warning, Error
+          $found | Format-Table -AutoSize Line, Severity, RuleName, Message | Out-String -Width 200
+          if ($found) { exit 1 }

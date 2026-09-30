@@ -84,17 +84,20 @@ func TestInstall(t *testing.T) {
 	}
 }
 
-func TestInstallPrunesToTwoNewest(t *testing.T) {
-	root := testutil.TempDir(t)
-	bin := filepath.Join(root, "bin")
-	src := filepath.Join(root, "src.exe")
-	os.WriteFile(src, []byte("x"), 0o755)
-	for _, v := range []string{"v0.2.0", "v0.1.0", "v0.3.0"} {
-		if err := install(src, bin, v); err != nil {
-			t.Fatal(err)
-		}
+func TestPruneKeepsNewestAndOwn(t *testing.T) {
+	bin := testutil.TempDir(t)
+	for _, v := range []string{"v0.2.0", "v0.1.0", "v0.4.0", "v0.3.0"} {
+		writeExe(t, bin, v, v)
+		os.WriteFile(filepath.Join(bin, v+".download.lock"), nil, 0o600)
 	}
-	if got := versions(bin); !slices.Equal(got, []string{"v0.3.0", "v0.2.0"}) {
+	prune(bin, 2, "v0.1.0")
+	if got := versions(bin); !slices.Equal(got, []string{"v0.4.0", "v0.3.0", "v0.1.0"}) {
 		t.Fatalf("versions after prune = %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(bin, "v0.2.0.download.lock")); !os.IsNotExist(err) {
+		t.Errorf("lock of a pruned version left: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bin, "v0.1.0.download.lock")); err != nil {
+		t.Errorf("lock of a kept version removed: %v", err)
 	}
 }

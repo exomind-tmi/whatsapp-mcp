@@ -1,8 +1,8 @@
 // Command mkzip zips a directory the way Claude Desktop accepts plugins:
 // entry names relative to the directory, without a "./" prefix, and Unix
-// modes so the Linux binary keeps its exec bit. No zip tool is needed.
+// modes so Linux executables keep their exec bit. No zip tool is needed.
 //
-//	go run ./scripts/mkzip -x server/whatsapp-mcp out.zip dir
+//	go run ./scripts/mkzip [-x entry]... out.zip dir
 package main
 
 import (
