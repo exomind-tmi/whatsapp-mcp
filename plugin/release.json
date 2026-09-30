@@ -1,4 +1,13 @@
 {
-  "version": "v0.0.0",
-  "assets": {}
+  "version": "v0.1.0",
+  "assets": {
+    "windows-amd64": {
+      "url": "https://github.com/exomind-tmi/whatsapp-mcp/releases/download/v0.1.0/whatsapp-mcp_v0.1.0_windows_amd64.exe",
+      "sha256": "4cf0ee74a666517241ea841d9002e60e431cd4b93dd1d1db1df8004359088dc2"
+    },
+    "linux-amd64": {
+      "url": "https://github.com/exomind-tmi/whatsapp-mcp/releases/download/v0.1.0/whatsapp-mcp_v0.1.0_linux_amd64",
+      "sha256": "4f8eaa08332693df2e8a0dea41dca7ba1e187a9fa78d5ff88d72bc17991df1ad"
+    }
+  }
 }
