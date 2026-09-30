@@ -1,0 +1,171 @@
+# Release on a v* tag, in three jobs:
+#
+#   build    builds both binaries from the tagged commit, with SHA256SUMS and
+#            the third-party license texts. Its token cannot write, so the
+#            tests and tools it runs cannot publish; it restores no Go cache,
+#            so a cache written by another run cannot reach the release.
+#   publish  publishes what build made as a GitHub Release. It checks out and
+#            runs no code.
+#   pin      then points the plugin at that release: a follow-up commit on
+#            main that writes plugin/release.json (URLs and SHA-256 of the
+#            published binaries) and the version in plugin.json.
+#
+# Why the pin is a follow-up commit and not part of the tag: release.json holds
+# the hashes of binaries built from the tagged commit, so that commit cannot
+# contain them. The order also protects users: hosts install the plugin from
+# main, and main starts pointing at a release only once its binaries are
+# published. Pre-release tags (v1.2.0-rc.1) get a release but no pin.
+#
+# The pin only moves forward: a tag not newer than what main pins (a hotfix
+# tag on an old line, a late re-run) changes nothing. It checks the downloaded
+# binaries against the SHA256SUMS that build computed, not against the ones in
+# the release, whose assets can be replaced. Pushes with GITHUB_TOKEN start no
+# CI, so the pin itself runs the checks its commit can break.
+#
+# Tags do not queue behind each other (a shared concurrency group would cancel
+# the waiting ones); pins of parallel tags race for main, and the loser retries
+# on the new main.
+#
+# A failed pin can be re-run on its own ("Re-run failed jobs"): build's outputs
+# survive, and a pin that is already on main does nothing. A tag pushed again
+# with other binaries fails it: tags must not be reused.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      sums: ${{ steps.stage.outputs.sums }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Tag is a semver release on main
+        run: |
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::tag $TAG is not semver"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$TAG is not on main"; exit 1; }
+      - name: Test
+        run: go test ./...
+      - name: Build
+        run: VERSION="$TAG" scripts/build.sh
+      - name: Notices and license texts
+        run: scripts/notices.sh && git diff --exit-code THIRD_PARTY_NOTICES.md
+      - name: Stage assets
+        id: stage
+        run: |
+          mkdir -p dist/release
+          cp dist/windows-amd64/whatsapp-mcp.exe "dist/release/whatsapp-mcp_${TAG}_windows_amd64.exe"
+          cp dist/linux-amd64/whatsapp-mcp "dist/release/whatsapp-mcp_${TAG}_linux_amd64"
+          cp LICENSE THIRD_PARTY_NOTICES.md dist/licenses/
+          go run ./scripts/mkzip "dist/release/whatsapp-mcp_${TAG}_licenses.zip" dist/licenses
+          (cd dist/release && sha256sum -- * >SHA256SUMS && cat SHA256SUMS)
+          { echo 'sums<<EOF'; cat dist/release/SHA256SUMS; echo EOF; } >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: dist/release/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: dist/release
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          pre=()
+          [[ $TAG == *-* ]] && pre=(--prerelease)
+          gh release create "$TAG" dist/release/* --verify-tag --title "$TAG" --generate-notes "${pre[@]}"
+
+  pin:
+    needs: [build, publish]
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the pin commit to main
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Download the published binaries, check them against build's sums, make release.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMS: ${{ needs.build.outputs.sums }}
+        run: |
+          gh release download "$TAG" --dir dist/release --pattern "whatsapp-mcp_${TAG}_*_amd64*"
+          printf '%s\n' "$SUMS" >dist/SHA256SUMS
+          (cd dist/release && sha256sum --check --ignore-missing ../SHA256SUMS)
+          bash scripts/release-json.sh "$TAG" \
+            "windows-amd64=dist/release/whatsapp-mcp_${TAG}_windows_amd64.exe" \
+            "linux-amd64=dist/release/whatsapp-mcp_${TAG}_linux_amd64" >dist/release.json
+      - name: Pin plugin/release.json and the plugin version, check and push to main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet origin main
+            git reset --quiet --hard FETCH_HEAD
+            cur=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' plugin/release.json | head -n 1)
+            if [[ $cur == "$TAG" ]]; then
+              # A re-run finds its own pin; other binaries mean the tag was pushed again.
+              cmp -s dist/release.json plugin/release.json ||
+                { echo "::error::main pins $TAG to other binaries than this release: tags must not be reused"; exit 1; }
+              echo "main already pins $TAG: nothing to do"
+              exit 0
+            fi
+            if [[ $cur != v0.0.0 && $(printf '%s\n' "$cur" "$TAG" | sort -V | tail -n 1) == "$cur" ]]; then
+              echo "main pins $cur, newer than $TAG: nothing to do"
+              exit 0
+            fi
+            cp dist/release.json plugin/release.json
+            sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${TAG#v}\"/" plugin/.claude-plugin/plugin.json
+            git diff
+            # The CI checks this commit can break: the committed release.json
+            # (TestCommittedReleaseJSON; the other launcher tests write their
+            # own) and the plugin package.
+            go test ./tests/launcher/
+            bash scripts/plugin.sh
+            git commit --quiet -am "Pin the plugin to $TAG"
+            git push origin HEAD:main && exit 0
+            echo "main moved, retrying"
+            sleep $((attempt * 5))
+          done
+          echo "::error::could not push the pin to main"
+          exit 1

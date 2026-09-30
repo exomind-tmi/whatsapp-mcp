@@ -1,32 +1,42 @@
 #!/usr/bin/env bash
-# Builds and packs the plugin:
+# Packs the plugin as it ships: text only, no binaries. The launcher in it
+# downloads the binary pinned in release.json from GitHub Releases.
 #   dist/whatsapp-mcp-plugin.zip  - for Claude Desktop (Customize → Plugins → upload)
-#   dist/marketplace/             - local marketplace for Claude Code, e.g. on Ubuntu:
+#   dist/marketplace/             - local marketplace for Claude Code:
 #       claude plugin marketplace add ./dist/marketplace
 #       claude plugin install whatsapp@exomind-local
-# Set SKIP_BUILD=1 to pack the binaries already in dist/.
+# RELEASE_JSON=<file> packs that file as release.json instead of
+# plugin/release.json; scripts/dev-install.sh uses it to pin a local build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 command -v go >/dev/null || PATH="/c/Program Files/Go/bin:$PATH" # Git Bash on Windows
 
-[[ "${SKIP_BUILD:-}" == 1 ]] || scripts/build.sh >/dev/null
-scripts/notices.sh >/dev/null
-version=$(cat dist/VERSION)
+release=${RELEASE_JSON:-plugin/release.json}
+version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$release" | head -n 1)
+if [[ -z $version ]]; then
+  echo "plugin.sh: no version in $release" >&2
+  exit 1
+fi
+launcher=scripts/launch-whatsapp-mcp
 
 market=dist/marketplace
 stage=$market/plugins/whatsapp
 rm -rf "$market"
-mkdir -p "$market/.claude-plugin" "$stage/.claude-plugin" "$stage/server"
+mkdir -p "$market/.claude-plugin" "$market/plugins"
+cp -r plugin "$stage"
+cp "$release" "$stage/release.json"
+cp LICENSE THIRD_PARTY_NOTICES.md "$stage/"
+chmod 0755 "$stage/$launcher"
+# The manifest carries the pinned version, so hosts see an update.
+sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version#v}\"/" "$stage/.claude-plugin/plugin.json"
 
-cp plugin/.mcp.json LICENSE THIRD_PARTY_NOTICES.md "$stage/"
-cp -r dist/licenses "$stage/licenses"
-sed "s/\"version\": \"0.0.0\"/\"version\": \"${version#v}\"/" plugin/.claude-plugin/plugin.json \
-  >"$stage/.claude-plugin/plugin.json"
-# Linux binary first: MSYS cp treats "whatsapp-mcp" as "whatsapp-mcp.exe"
-# when the latter already exists and would overwrite it.
-cp dist/linux-amd64/whatsapp-mcp "$stage/server/whatsapp-mcp"
-cp dist/windows-amd64/whatsapp-mcp.exe "$stage/server/whatsapp-mcp.exe"
-chmod 0755 "$stage/server/whatsapp-mcp"
+# grep -I skips binary files, so -L lists them (and empty files).
+binaries=$(grep -rIL . "$stage" || true)
+if [[ -n $binaries ]]; then
+  echo "plugin.sh: the plugin must be text only, found:" >&2
+  echo "$binaries" >&2
+  exit 1
+fi
 
 cat >"$market/.claude-plugin/marketplace.json" <<'EOF'
 {
@@ -38,7 +48,7 @@ cat >"$market/.claude-plugin/marketplace.json" <<'EOF'
 EOF
 
 # Entries without "./" (Desktop rejects them otherwise) and with the exec bit
-# on the Linux binary; mkzip needs no zip tool, so this works in Git Bash.
+# on the Linux launcher; mkzip needs no zip tool, so this works in Git Bash.
 rm -f dist/whatsapp-mcp-plugin.zip
-go run ./scripts/mkzip -x server/whatsapp-mcp dist/whatsapp-mcp-plugin.zip "$stage"
+go run ./scripts/mkzip -x "$launcher" dist/whatsapp-mcp-plugin.zip "$stage"
 echo "dist/whatsapp-mcp-plugin.zip ($version)"

@@ -72,7 +72,14 @@ func (f *forwarder) replaceDaemon(ctx context.Context, info home.DaemonInfo, run
 			}
 		}
 	}
-	return f.startDaemon(ctx)
+	info, err := f.startDaemon(ctx)
+	if err == nil {
+		// Here, not in install: the plugin's launcher puts the binary into
+		// bin/<version>/ itself, so install copies nothing, yet each plugin
+		// update or dev build adds a version.
+		prune(f.h.BinDir(), keepVersions, f.version)
+	}
+	return info, err
 }
 
 func (f *forwarder) installSelf() error {

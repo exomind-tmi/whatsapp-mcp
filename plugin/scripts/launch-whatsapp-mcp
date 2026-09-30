@@ -1,0 +1,139 @@
+#!/bin/sh
+# whatsapp-mcp launcher for Linux.
+#
+# plugin/.mcp.json runs ${CLAUDE_PLUGIN_ROOT}/scripts/launch-whatsapp-mcp: on
+# Linux that is this file, on Windows the hosts pick launch-whatsapp-mcp.cmd
+# next to it, which runs launch.ps1.
+#
+# It does what launch.ps1 does: runs the whatsapp-mcp binary pinned in
+# plugin/release.json from <home>/bin/<version>/, downloading it from GitHub
+# Releases on first use and checking its SHA-256. stdout is the MCP channel:
+# nothing but the binary's own output may reach it.
+
+lock_wait=180 # seconds to wait while a parallel launcher downloads
+release=$(dirname "$0")/../release.json
+log=
+
+say() {
+  [ -z "$log" ] || printf '%s pid=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$*" >>"$log" 2>/dev/null
+}
+
+fail() {
+  say "error: $*"
+  echo "whatsapp-mcp launcher: $*" >&2
+  exit 1
+}
+
+# json_field KEY: the string value of the last "KEY": "..." in stdin.
+json_field() {
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+
+# fetch URL OUT: download with $downloader, resuming a partial OUT. A stalled
+# transfer fails instead of hanging with the lock taken: under 1 KB/s for 30 s
+# (curl), no data for 30 s (wget).
+fetch() {
+  case $downloader in
+    curl) curl -fsSL -C - --connect-timeout 10 --speed-limit 1024 --speed-time 30 -o "$2" "$1" ;;
+    wget) wget -q -c --tries=3 -T 30 -O "$2" "$1" ;;
+  esac
+}
+
+# lock: take the download lock on fd 9. The downloader inherits the fd, so a
+# downloader that outlives a killed launcher keeps the lock until it exits.
+# Polls with -n: busybox flock has no -w.
+lock() {
+  exec 9>"$state/bin/$version.download.lock" || fail "cannot create the download lock"
+  waited=0
+  until flock -n 9; do
+    [ "$waited" -lt "$lock_wait" ] || fail "another launcher has been downloading $version for over ${lock_wait}s"
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# Download, verify, then rename into place: the target never holds a partial
+# or unverified file. The partial download is kept per version under the lock,
+# so when a host kills a launcher mid-download (e.g. on its MCP start timeout)
+# the next launcher resumes it instead of starting over.
+install_binary() {
+  lock
+  [ ! -s "$exe" ] || return 0 # a parallel launcher installed it while we waited
+  part=$state/bin/$version.part
+  say "downloading $url"
+  fetch "$url" "$part"
+  rc=$?
+  # A refused resume (curl 33, 36; wget 8, which also means an HTTP error)
+  # starts over once: for a missing file fetch sends no range.
+  case $downloader-$rc in
+    curl-33 | curl-36 | wget-8)
+      if [ -s "$part" ]; then
+        say "$downloader cannot resume (exit $rc), downloading from scratch"
+        rm -f "$part"
+        fetch "$url" "$part"
+        rc=$?
+      fi
+      ;;
+  esac
+  if [ "$rc" -ne 0 ]; then
+    [ -s "$part" ] || rm -f "$part" # keep only something to resume
+    fail "download failed ($downloader exit $rc): $url"
+  fi
+  set -- "$(sha256sum "$part")"
+  if [ "${1%% *}" != "$sha" ]; then
+    rm -f "$part" # a corrupt partial must not be resumed
+    fail "SHA-256 mismatch for $url: expected $sha, got ${1%% *}"
+  fi
+  { chmod 755 "$part" && mkdir -p "$state/bin/$version" && mv -f "$part" "$exe"; } ||
+    fail "cannot install $exe"
+  say "installed $exe"
+}
+
+if [ -n "${WHATSAPP_MCP_HOME:-}" ]; then
+  state=$WHATSAPP_MCP_HOME
+  case $state in /*) ;; *) fail "WHATSAPP_MCP_HOME must be an absolute path, got '$state'" ;; esac
+else
+  [ -n "${HOME:-}" ] || fail "HOME is not set"
+  state=$HOME/.mcp/exomind-tmi/whatsapp-mcp
+fi
+(umask 077 && mkdir -p "$state/logs" "$state/bin") || fail "cannot create $state"
+log=$state/logs/launcher.log
+[ "$(wc -c 2>/dev/null <"$log" || echo 0)" -le 1048576 ] || mv -f "$log" "$log.1" 2>/dev/null
+
+case $(uname -s)-$(uname -m) in
+  Linux-x86_64) platform=linux-amd64 ;;
+  *) fail "no build for $(uname -s) $(uname -m)" ;;
+esac
+
+# release.json is read without jq, which is not installed everywhere. The
+# parsing relies on its fixed shape (scripts/release-json.sh): "version" occurs
+# once, each asset is a flat object keyed by platform, and no value contains
+# quotes or braces. Line breaks and spacing do not matter.
+json=$(tr -d '\r\n' <"$release") || fail "cannot read $release"
+version=$(printf '%s' "$json" | json_field version)
+printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ||
+  fail "release.json has no valid version: '$version'" # semver only: it becomes a path segment
+exe=$state/bin/$version/whatsapp-mcp
+say "start $version"
+
+if [ ! -s "$exe" ]; then
+  asset=$(printf '%s' "$json" | sed -n "s/.*\"$platform\"[[:space:]]*:[[:space:]]*{\([^}]*\)}.*/\1/p")
+  url=$(printf '%s' "$asset" | json_field url)
+  sha=$(printf '%s' "$asset" | json_field sha256 | tr 'A-F' 'a-f')
+  if [ -z "$url" ] || ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+    fail "release.json ($version) has no $platform build; is this plugin released yet?"
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    downloader=curl
+  elif command -v wget >/dev/null 2>&1; then
+    downloader=wget
+  else
+    fail "downloading the server needs curl or wget"
+  fi
+  command -v flock >/dev/null 2>&1 || fail "downloading the server needs flock"
+  command -v sha256sum >/dev/null 2>&1 || fail "verifying the download needs sha256sum"
+  install_binary >/dev/null # stdout is the MCP channel
+fi
+
+exec 9>&- # do not hand the download lock to the server
+exec "$exe" stdio

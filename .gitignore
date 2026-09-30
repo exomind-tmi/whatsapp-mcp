@@ -3,6 +3,9 @@
 *.exe
 *.zip
 *.plugin
+# `go build` output on Linux: no extension
+/whatsapp-mcp
+/cmd/whatsapp-mcp/whatsapp-mcp
 
 # local state never lives in the repo
 .env

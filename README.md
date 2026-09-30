@@ -72,7 +72,7 @@ Go 1.27, no CGO. Builds for Windows and Linux (x64).
 ```
 go test ./...
 scripts/build.sh      # dist/windows-amd64, dist/linux-amd64
-scripts/plugin.sh     # dist/whatsapp-mcp-plugin.zip for local testing
+scripts/dev-install.sh # a plugin pinned to a local build, for testing
 scripts/notices.sh    # regenerate THIRD_PARTY_NOTICES.md after changing go.mod
 ```
 

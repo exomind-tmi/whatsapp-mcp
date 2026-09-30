@@ -16,8 +16,8 @@ import (
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
 )
 
-// keepVersions is how many versions stay in bin/; the running daemon is
-// always the newest, so it is never pruned.
+// keepVersions is how many of the newest versions stay in bin/; the daemon
+// runs the newest, so it is never pruned.
 const keepVersions = 2
 
 const exeRetry = 2 * time.Second
@@ -53,7 +53,6 @@ func install(src, binDir, version string) error {
 	if err != nil && !same(src, dst) {
 		return err
 	}
-	prune(binDir, keepVersions)
 	return nil
 }
 
@@ -127,11 +126,17 @@ func maxBin(binDir string) (string, error) {
 	return filepath.Join(binDir, vs[0], exeName()), nil
 }
 
-// prune removes versions beyond the newest keep. Errors are ignored: a
-// running exe cannot be deleted on Windows, and that is fine.
-func prune(binDir string, keep int) {
+// prune removes versions beyond the newest keep, and their launchers'
+// download locks, but never own: the version of the running shim, which its
+// plugin's launcher would download again. Errors are ignored: a running exe
+// cannot be deleted on Windows, and that is fine.
+func prune(binDir string, keep int, own string) {
 	vs := versions(binDir)
 	for _, v := range vs[min(keep, len(vs)):] {
+		if v == own {
+			continue
+		}
 		_ = os.RemoveAll(filepath.Join(binDir, v))
+		_ = os.Remove(filepath.Join(binDir, v+".download.lock"))
 	}
 }
