@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "whatsapp": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/server/whatsapp-mcp",
+      "args": ["stdio"]
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "whatsapp",
+  "version": "0.0.0",
+  "description": "WhatsApp for Claude: read, search and send messages across several linked accounts.",
+  "author": { "name": "Exomind Tmi", "url": "https://github.com/exomind-tmi" },
+  "homepage": "https://github.com/exomind-tmi/whatsapp-mcp",
+  "repository": "https://github.com/exomind-tmi/whatsapp-mcp",
+  "license": "MIT"
+}

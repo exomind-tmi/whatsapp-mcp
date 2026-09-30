@@ -1,0 +1,11 @@
+# build output
+/dist/
+*.exe
+*.zip
+*.plugin
+
+# local state never lives in the repo
+.env
+*.db
+*.db-wal
+*.db-shm
