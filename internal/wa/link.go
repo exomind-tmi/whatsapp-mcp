@@ -19,7 +19,7 @@ var ErrNoLogin = errors.New("no such login page")
 // each other, the QR code in the chat and the pairing code for a number.
 var ErrQRImageWithPhone = errors.New("qr_image and phone are mutually exclusive")
 
-// Link is the add tool (plan 5.3). It applies the add policy (plan 6.4): an
+// Link is the add tool. It applies the add policy (addPolicy): an
 // account that is linked is refused, one whose device is intact reconnects
 // with its keys (and ignores the phone number and qr_image), and the others get
 // a login link or, with a phone number, a pairing code or, with qr_image, the
@@ -57,7 +57,7 @@ func (m *Manager) Link(ctx context.Context, req LinkRequest) (LinkTicket, error)
 		}
 		return m.issueCode(ctx, nick, adm.sess, digits)
 	}
-	m.log.Info("login link issued", "account", nick) // never the link itself (plan 10)
+	m.log.Info("login link issued", "account", nick) // never the link itself: it is the capability to link the account
 	return LinkTicket{LoginURL: m.baseURL + LoginPath + nick + "?t=" + adm.link.value, ExpiresAt: adm.link.expires}, nil
 }
 
@@ -87,8 +87,8 @@ func (m *Manager) ValidLogin(nick, nonce string) bool {
 
 // Login is what each poll of a login page calls; the page itself only checks
 // the nonce (ValidLogin). The nonce is checked here too, ErrNoLogin when it is
-// not valid. The first call with a nonce starts the pairing (plan 6.3, with
-// the page's script as the one that opens it); later ones, such as a reload
+// not valid. The first call with a nonce starts the pairing (the page's script
+// is the one that makes it); later ones, such as a reload
 // of the page, return the state of that pairing, whatever became of it: the
 // next add makes a new link. A first call that starts none, because the
 // account has been linked since add or reconnects by itself, is answered
@@ -142,6 +142,7 @@ func (m *Manager) startLogin(ctx context.Context, nick string, n *loginNonce) er
 	default: // the account turned reconnectable since add
 		n.settled = &LoginState{State: string(pairDone), Hint: reconnectingHint}
 	}
+	m.nonces.open(nick, n) // from now on the account's status is the pairing's, not "waiting for the link"
 	return nil
 }
 

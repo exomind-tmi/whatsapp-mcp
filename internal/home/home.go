@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -38,12 +39,41 @@ func Resolve() (Home, error) {
 	return Home{filepath.Join(u, ".mcp", "exomind-tmi", "whatsapp-mcp")}, nil
 }
 
-// Ensure creates the state directory and its fixed subdirectories.
+// Ensure creates the state directory and its fixed subdirectories, private to
+// the user: the keys of the linked devices live in them. On Unix a directory that
+// exists already, made by an older version or by hand with a looser mode, is
+// tightened too, which MkdirAll does not do. Windows has no use for it: the
+// default home is in the user's profile, which only the user, the administrators
+// and the system can read, and a home elsewhere has the access of the place.
 func (h Home) Ensure() error {
 	for _, d := range []string{h.Dir, h.LogsDir(), h.BinDir()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}
+		if runtime.GOOS != "windows" {
+			if err := makePrivate(d); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// makePrivate takes the access of the group and of others away from the directory
+// d, if it has any. A directory that is the user's alone already is left as it is,
+// so that one the user cannot chmod, such as a shared one that WHATSAPP_MCP_HOME
+// points to, does not stop every command, stop and status included; only a
+// directory that stays open to others is an error.
+func makePrivate(d string) error {
+	st, err := os.Stat(d)
+	if err != nil {
+		return err
+	}
+	if st.Mode().Perm()&0o077 == 0 {
+		return nil
+	}
+	if err := os.Chmod(d, 0o700); err != nil {
+		return fmt.Errorf("make the state directory private: %w", err)
 	}
 	return nil
 }

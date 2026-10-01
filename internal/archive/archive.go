@@ -1,9 +1,10 @@
 // Package archive owns archive.db: the schema and its migrations, the
-// accounts and, from M2, the message archive itself.
+// accounts and, later, the message archive itself.
 //
-// There is one pool, the writer (MaxOpenConns(1)). Plan 3.2 adds a read-only
-// pool for the M2 queries, so that reads do not queue behind history writes;
-// M1 only does a few small statements per manage-accounts call and needs none.
+// There is one pool, the writer (MaxOpenConns(1)). A read-only pool for the
+// message queries is to come, so that reads do not queue behind history writes;
+// for now only a few small statements per manage-accounts call run, and none is
+// needed.
 package archive
 
 import (

@@ -128,14 +128,14 @@ func TestLinkQR(t *testing.T) {
 		t.Errorf("accounts.jid = %q, want %q", got, jid)
 	}
 
-	// No QR code is logged (plan 10).
+	// No QR code is logged: whoever has it can link an account.
 	if log := buf.String(); strings.Contains(log, "secretcode") || !strings.Contains(log, "QR code issued") {
 		t.Errorf("log:\n%s", log)
 	}
 }
 
 // TestLinkQROutcomes: add with qr_image applies the same policy as the other
-// ways (plan 6.4). A reconnect ignores qr_image, and a refusal of the policy is
+// ways. A reconnect ignores qr_image, and a refusal of the policy is
 // told as it is.
 func TestLinkQROutcomes(t *testing.T) {
 	for _, tc := range linkCases() {
@@ -841,7 +841,7 @@ func TestLinkQRPairingEnds(t *testing.T) {
 		{name: "the codes run out", end: items(whatsmeow.QRChannelTimeout),
 			status: StatusNeedsLink, reason: "QR expired, call add again"},
 		{name: "pair error", end: items(whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventError, Error: errors.New("boom")}),
-			status: StatusNeedsLink, reason: "linking failed: boom; call add again"},
+			status: StatusNeedsLink, reason: "linking failed; call add again"},
 		{name: "another number scanned", end: scanned("70000000002"),
 			status: StatusNeedsLink, reason: differentNumberReason},
 	} {

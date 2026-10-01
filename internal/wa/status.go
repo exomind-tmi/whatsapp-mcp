@@ -7,7 +7,7 @@ import (
 )
 
 // next returns a with the Status, Reason and ExpiresAt that the whatsmeow
-// event evt leads to (plan 6.6); now dates the end of a ban. whatsmeow
+// event evt leads to; now dates the end of a ban. whatsmeow
 // dispatches events as pointers. Events that say nothing about the
 // connection leave a unchanged, and so does StreamError: when the server
 // then closes the socket, Disconnected follows (client.go:600-602).

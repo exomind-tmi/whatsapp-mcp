@@ -15,7 +15,7 @@ import (
 )
 
 // deviceName is the name the phone shows for us under Linked devices, a
-// default the user can rename on the phone (Anton's decision of 2026-10-01).
+// default the user can rename on the phone.
 func deviceName() string { return deviceNameFor(runtime.GOOS) }
 
 func deviceNameFor(goos string) string {
@@ -49,8 +49,7 @@ func osName(goos string) string {
 	return ""
 }
 
-// versionTimeout bounds the check of the current WhatsApp Web version
-// (plan 6.2).
+// versionTimeout bounds the check of the current WhatsApp Web version.
 const versionTimeout = 10 * time.Second
 
 // maxErrLen caps a logged version-check error: on an unexpected status

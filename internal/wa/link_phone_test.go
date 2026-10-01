@@ -199,7 +199,7 @@ func TestLinkPhone(t *testing.T) {
 		t.Errorf("accounts.jid = %q, want %q", got, jid)
 	}
 
-	// Neither the number, nor the code, nor a QR code is logged (plan 10).
+	// Neither the number, nor the code, nor a QR code is logged.
 	if log := buf.String(); strings.Contains(log, typedDigits) || strings.Contains(log, pairCodeOK) || strings.Contains(log, "secretcode") ||
 		!strings.Contains(log, "pairing code issued") {
 		t.Errorf("log:\n%s", log)
@@ -207,7 +207,7 @@ func TestLinkPhone(t *testing.T) {
 }
 
 // TestLinkPhoneOutcomes: add with a phone number applies the same policy as
-// without one (plan 6.4). A reconnect ignores the number, and a refusal of
+// without one. A reconnect ignores the number, and a refusal of
 // the policy is told whatever the number.
 func TestLinkPhoneOutcomes(t *testing.T) {
 	for _, tc := range linkCases() {
@@ -550,7 +550,7 @@ func TestLinkPhoneFails(t *testing.T) {
 				t.Errorf("%d PairPhone calls", len(phoneCalls(fn)))
 			}
 			requireNothingLeft(t, f, m, fn, "fresh", s)
-			// The server's words are for the log, the user's number is not (plan 10).
+			// The server's words are for the log, the user's number is not.
 			if log := buf.String(); strings.Contains(log, typedDigits) {
 				t.Errorf("the number is in the log:\n%s", log)
 			}
@@ -1071,7 +1071,7 @@ func TestLinkPhonePairingEnds(t *testing.T) {
 		{name: "the codes run out", end: items(whatsmeow.QRChannelTimeout),
 			status: StatusNeedsLink, reason: codeExpired},
 		{name: "pair error", end: items(whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventError, Error: errors.New("boom")}),
-			status: StatusNeedsLink, reason: "linking failed: boom; call add again"},
+			status: StatusNeedsLink, reason: "linking failed; call add again"},
 		{name: "passkey", end: items(whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventPasskeyRequest, PasskeyRequest: &events.PairPasskeyRequest{}}),
 			status: StatusNeedsLink, reason: "the phone asked to confirm the link with a passkey, which whatsapp-mcp cannot do; call add again"},
 		{name: "unexpected state", end: items(whatsmeow.QRChannelErrUnexpectedEvent),

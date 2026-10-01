@@ -1,6 +1,7 @@
 package wa
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -228,7 +229,7 @@ func TestPairingFails(t *testing.T) {
 		{name: "connect fails", fails: []error{errHandshake},
 			status: StatusNeedsLink, reason: "could not connect to WhatsApp; check the network and call add again"},
 		{name: "pair error", items: []whatsmeow.QRChannelItem{code("2@a", time.Minute), {Event: whatsmeow.QRChannelEventError, Error: errors.New("boom")}},
-			status: StatusNeedsLink, reason: "linking failed: boom; call add again"},
+			status: StatusNeedsLink, reason: "linking failed; call add again"},
 		{name: "passkey request", items: []whatsmeow.QRChannelItem{code("2@a", time.Minute), {Event: whatsmeow.QRChannelEventPasskeyRequest, PasskeyRequest: &events.PairPasskeyRequest{}}},
 			status: StatusNeedsLink, reason: "the phone asked to confirm the link with a passkey, which whatsapp-mcp cannot do; call add again"},
 		{name: "passkey confirmation", items: []whatsmeow.QRChannelItem{{Event: whatsmeow.QRChannelEventPasskeyResponse, PasskeyConfirmation: &events.PairPasskeyConfirmation{}}},
@@ -288,6 +289,33 @@ func TestPairingFails(t *testing.T) {
 				t.Error("a failed pairing left a device")
 			}
 		})
+	}
+}
+
+// TestPairingErrorDetailsStayInTheLog: what whatsmeow says went wrong with a
+// pairing, which may be a database's words with a path in them, is not the reason
+// the agent and the page are given; it is for the log.
+func TestPairingErrorDetailsStayInTheLog(t *testing.T) {
+	f := newFixture(t)
+	var buf bytes.Buffer
+	f.log = debugLog(&buf)
+	fn := &fakeNet{}
+	m := f.start(t, fn.network(readyGlobals()))
+	s := pair(t, m, "fresh")
+	q := fn.qr(t, 0)
+	q.ch <- code("2@a", time.Minute)
+	q.ch <- whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventError, Error: errors.New("sqlite: C:/secret/store.db is locked")}
+	<-s.done
+
+	const reason = "linking failed; call add again"
+	if got := s.status().Reason; got != reason {
+		t.Errorf("the page's reason %q, want %q", got, reason)
+	}
+	if got := infoOf(m, "fresh").Reason; got != reason {
+		t.Errorf("the account's reason %q, want %q", got, reason)
+	}
+	if !strings.Contains(buf.String(), "secret/store.db") {
+		t.Errorf("the detail is not in the log:\n%s", buf.String())
 	}
 }
 
@@ -778,7 +806,7 @@ func TestPairingReplacesOldDevice(t *testing.T) {
 			old := m.accounts["personal"].cli
 			if tc.unlinked {
 				old.DangerousInternals().DispatchEvent(&events.LoggedOut{Reason: events.ConnectFailureLoggedOut})
-				if err := old.Store.Delete(context.Background()); err != nil {
+				if err := deleteStored(context.Background(), old); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -834,6 +862,9 @@ func TestPairedConnectLate(t *testing.T) {
 	s := pair(t, m, "fresh")
 	q := fn.qr(t, 0)
 	q.ch <- code("2@a", time.Minute)
+	// The connect has returned once the code is read; before it the call is not yet
+	// named for the client that has no device (phoneOf).
+	eventually(t, "the code", stateIs(s, pairCode))
 	scan(t, q, types.NewADJID("70000000005", 0, 13))
 	<-s.done
 	m.wg.Wait()
@@ -1028,7 +1059,7 @@ func TestRelinkCrashLeavesOrphan(t *testing.T) {
 	if got := storedDevices(t, m); !slices.Equal(got, []string{newJID.String()}) {
 		t.Errorf("devices %v, want the old one swept", got)
 	}
-	if got := m.accounts["personal"].cli.Store.ID; *got != newJID {
+	if got := deviceID(m.accounts["personal"].cli); *got != newJID {
 		t.Errorf("the account uses %v, want %v", got, newJID)
 	}
 }

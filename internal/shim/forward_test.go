@@ -29,7 +29,8 @@ import (
 	"github.com/exomind-tmi/whatsapp-mcp/internal/wa"
 )
 
-// startDaemon runs the real daemon in-process on a temp home.
+// startDaemon runs the real daemon in-process on a temp home, with no WhatsApp
+// to reach.
 func startDaemon(t *testing.T, version string) home.Home {
 	t.Helper()
 	h := home.Home{Dir: testutil.TempDir(t)}
@@ -38,10 +39,11 @@ func startDaemon(t *testing.T, version string) home.Home {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- daemon.Run(ctx, h, version) }()
+	go func() { done <- daemon.Run(ctx, h, version, daemon.WithoutWhatsApp()) }()
 	t.Cleanup(func() { cancel(); <-done })
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		if _, err := h.ReadDaemonInfo(); err == nil {
+			testutil.WaitForLog(t, h.Log("daemon.log"), "never reaches WhatsApp") // it reaches no WhatsApp
 			return h
 		}
 		if time.Now().After(deadline) {
@@ -104,8 +106,7 @@ func TestShimForwardsToDaemon(t *testing.T) {
 		t.Error("structuredContent lost in forwarding")
 	}
 
-	// add answers with a link; the page is not opened, as that would start a
-	// pairing on the real network.
+	// add answers with a link; the page is not opened.
 	res, text = callText(t, cs, "manage-accounts", map[string]any{"action": "add", "account_id": "personal"})
 	if res.IsError || !strings.Contains(text, `"login_url":"http://127.0.0.1:`) {
 		t.Fatalf("add via daemon: isError=%v %s", res.IsError, text)

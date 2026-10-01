@@ -49,7 +49,7 @@ func fillDevice(t *testing.T, m *Manager, nick, tag string) []string {
 	m.mu.Lock()
 	cli := m.accounts[nick].cli
 	m.mu.Unlock()
-	jid := cli.Store.ID.String()
+	jid := deviceID(cli).String()
 	marker := func(kind string) string { return tag + "-" + kind }
 	hash := sha256.Sum256([]byte(tag))
 	identity := []byte((marker("identity") + strings.Repeat("-", 32))[:32])
@@ -220,7 +220,7 @@ func TestRemoveGoesOnWhenStoreDBCannotBeCleaned(t *testing.T) {
 	m, f := removeFixture(t, &fakeNet{})
 	m.log = debugLog(&buf)
 	old := m.accounts["personal"].cli
-	if err := old.Store.Delete(context.Background()); err != nil { // as whatsmeow does on LoggedOut: no write is left for the unlinking
+	if err := deleteStored(context.Background(), old); err != nil { // as whatsmeow does on LoggedOut: no write is left for the unlinking
 		t.Fatal(err)
 	}
 	m.store.db.Close()
@@ -304,7 +304,7 @@ func init() {
 func TestRemoveWhenWhatsmeowDeletesTheDeviceBesideUs(t *testing.T) {
 	m, f, _ := removeFixtureTriggered(t, &fakeNet{}, "store.db", "whatsmeow_device", "test_hook(old.jid) = 1")
 	cli := m.accounts["personal"].cli
-	hook := func(jid string) bool {
+	hook := func(jid string) bool { // runs inside the Delete, which holds deviceMu (the network's deleteDevice)
 		if jid != cli.Store.ID.String() {
 			return false
 		}
@@ -331,6 +331,8 @@ func TestRemoveWhenWhatsmeowDeletesTheDeviceBesideUs(t *testing.T) {
 func TestRemoveWhenAStrayDeviceStays(t *testing.T) {
 	fn := &fakeNet{connected: map[string]bool{personalPhone: true}, logoutErr: errors.New("timed out")}
 	m, f, lift := removeFixtureTriggered(t, fn, "store.db", "whatsmeow_device", "EXISTS (SELECT 1 FROM test_refuse) AND old.jid LIKE '%:13@%'")
+	var buf bytes.Buffer
+	m.log = debugLog(&buf)
 	forceStatus(m, "personal", StatusNeedsLink)
 	s := pair(t, m, "personal")
 	q := fn.qr(t, 0)
@@ -347,8 +349,11 @@ func TestRemoveWhenAStrayDeviceStays(t *testing.T) {
 	connects := countCalls(fn, "connect "+personalPhone)
 
 	r := remove(t, m, "personal")
-	if r.err == nil || !strings.Contains(r.err.Error(), "blocked by the test") {
-		t.Fatalf("Remove = %+v, %v; want the error of the stray device's delete", r.res, r.err)
+	if r.err == nil || !strings.Contains(r.err.Error(), "could not delete the keys of the device") || strings.Contains(r.err.Error(), "blocked by the test") {
+		t.Fatalf("Remove = %+v, %v; want the error of the stray device's delete, without the database's words", r.res, r.err)
+	}
+	if !strings.Contains(buf.String(), "blocked by the test") {
+		t.Errorf("the database's words are not in the log:\n%s", buf.String())
 	}
 	m.wg.Wait()
 	m.mu.Lock()
@@ -393,6 +398,20 @@ func TestRemoveInterruptedSaysSo(t *testing.T) {
 	}
 	if got := archiveOf(t, f)["personal"]; got != [2]int{1, 2} {
 		t.Errorf("the archive %v", got)
+	}
+}
+
+// TestRemovalInterruptedReason pins the wording of the reason an interrupted
+// remove leaves: finishing it deletes the archive for good, and the agent may meet
+// the reason long after the call, so it is told to ask the user first, as the
+// refusal of a relink with another number does; and that add is the other way out,
+// which keeps the archive.
+func TestRemovalInterruptedReason(t *testing.T) {
+	for _, want := range []string{"the removal was interrupted", "call remove again", "deletes the message archive",
+		"ask the user first", "call add to link the account again", "the archive is kept"} {
+		if !strings.Contains(removalInterruptedReason, want) {
+			t.Errorf("the reason %q lacks %q", removalInterruptedReason, want)
+		}
 	}
 }
 
@@ -517,6 +536,8 @@ func TestDeviceGone(t *testing.T) {
 	if deviceGone(cli) {
 		t.Fatal("a client with its device is gone")
 	}
+	deviceMu.Lock()
+	defer deviceMu.Unlock()
 	id := cli.Store.ID
 	cli.Store.ID = nil
 	if !deviceGone(cli) {

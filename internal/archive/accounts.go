@@ -74,7 +74,7 @@ func (db *DB) AddAccount(ctx context.Context, nick string) error {
 // SetAccountJID records the device the account is linked to; a relink
 // replaces it. jid is the full AD-JID (with the device number), which
 // store.db's GetDevice needs. An empty one is refused: "not linked" is NULL
-// alone, so the orphan cleanup of plan 6.1 has one state to compare against.
+// alone, so the orphan cleanup has one state to compare against.
 // accounts.jid is UNIQUE: a device that another nick holds is ErrJIDTaken.
 func (db *DB) SetAccountJID(ctx context.Context, nick, jid string) error {
 	const op = "set jid of account"

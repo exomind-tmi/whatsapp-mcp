@@ -19,7 +19,7 @@ type deviceStore struct {
 	db *sql.DB
 }
 
-// forget is what follows the deletion of a device, as the plan 6.5 promises that
+// forget is what follows the deletion of a device, as a remove promises that
 // nothing of it stays on this computer. It deletes the privacy tokens of devices
 // that are no longer there, which the deletion of a device leaves (see below), and
 // then empties store.db's WAL. secure_delete zeroes the pages of a deleted device's
@@ -36,8 +36,8 @@ type deviceStore struct {
 // device's own among them. The tokens go here. The map stays: whatsmeow caches it
 // in memory and writes a mapping only when the cache does not have it, so a row
 // deleted here would not come back until a restart, and the number of a device
-// that is linked again would be missing from the file; the plan (6.5) lists it as
-// what a remove leaves.
+// that is linked again would be missing from the file. It is what a remove
+// leaves behind.
 func (s *deviceStore) forget(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx,
 		`DELETE FROM whatsmeow_privacy_tokens WHERE our_jid NOT IN (SELECT jid FROM whatsmeow_device)`)

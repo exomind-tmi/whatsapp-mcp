@@ -202,9 +202,9 @@ func requireEnded(t *testing.T, m *Manager) {
 }
 
 // TestRemove takes each state an account can be in through Remove: the device
-// goes the way plan 6.5 says, the hint comes under the conditions it says, and
-// whatever the state, the archive, the account and its device are gone, and the
-// others' are not.
+// goes the way Remove documents, the hint comes under the conditions it names,
+// and whatever the state, the archive, the account and its device are gone, and
+// the others' are not.
 func TestRemove(t *testing.T) {
 	const phone = personalPhone
 	banned := func(t *testing.T, m *Manager) {
@@ -213,7 +213,7 @@ func TestRemove(t *testing.T) {
 	unlinkedOnThePhone := func(t *testing.T, m *Manager) {
 		old := m.accounts["personal"].cli
 		old.DangerousInternals().DispatchEvent(&events.LoggedOut{Reason: events.ConnectFailureLoggedOut})
-		if err := old.Store.Delete(context.Background()); err != nil { // as whatsmeow does on LoggedOut
+		if err := deleteStored(context.Background(), old); err != nil { // as whatsmeow does on LoggedOut
 			t.Fatal(err)
 		}
 	}
@@ -283,7 +283,9 @@ func TestRemoveWhileWhatsmeowDeletesTheDevice(t *testing.T) {
 	if err := m.store.DeleteDevice(context.Background(), dev); err != nil {
 		t.Fatal(err)
 	}
+	deviceMu.Lock()
 	dev.ID = nil // Deleted is still false
+	deviceMu.Unlock()
 	if r := remove(t, m, "personal"); r.err != nil || r.res.Hint != "" {
 		t.Fatalf("Remove = %+v, %v", r.res, r.err)
 	}
@@ -530,16 +532,63 @@ func TestRemoveOffline(t *testing.T) {
 	}
 }
 
+// TestNoConnectAttemptBesideTheUnlinking: the retries of a connect that fails start
+// no attempt while the account's device is being taken away. whatsmeow's Delete
+// writes the ID and the Deleted that Connect reads, and gives them no lock.
+func TestNoConnectAttemptBesideTheUnlinking(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enter, once sync.Once
+	letGo := func() { once.Do(func() { close(release) }) }
+	fn := &fakeNet{
+		fails:      map[string][]error{personalPhone: slices.Repeat([]error{errHandshake}, 100000)},
+		logoutHold: func(*whatsmeow.Client) { enter.Do(func() { close(entered) }); <-release },
+	}
+	f := newFixture(t)
+	f.account(t, "personal", personalPhone)
+	f.devices(t, map[string]string{personalPhone: ""})
+	m := f.start(t, fn.network(readyGlobals()))
+	t.Cleanup(letGo) // before Close, which waits for the unlinking
+	connects := func() int { return countCalls(fn, "connect "+personalPhone) }
+	eventually(t, "the retries", func() bool { return connects() >= 3 })
+
+	res := removeAsync(context.Background(), m, "personal")
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the unlinking did not start")
+	}
+	// The retries wait at most maxReconnectErrors steps of a millisecond: one that
+	// was waiting has met the unlinking by now, and one on its way has ended.
+	time.Sleep(100 * time.Millisecond)
+	before := connects()
+	time.Sleep(100 * time.Millisecond)
+	if after := connects(); after != before {
+		t.Errorf("%d connect attempts while the device was being unlinked", after-before)
+	}
+
+	letGo()
+	if r := removed(t, res); r.err != nil || r.res.Hint != removeDeviceHint {
+		t.Fatalf("Remove = %+v, %v", r.res, r.err)
+	}
+	requireEnded(t, m)
+}
+
 // TestRemoveWhenTheArchiveCannotBeDeleted: the device is gone by then, so the
 // account stays as needs_link, "no keys", with its archive and number, and a
 // repeated call goes on from there, with the hint the first one had.
 func TestRemoveWhenTheArchiveCannotBeDeleted(t *testing.T) {
 	fn := &fakeNet{}
 	m, f, lift := removeFixtureRefusing(t, fn, "archive.db", "accounts")
+	var buf bytes.Buffer
+	m.log = debugLog(&buf)
 
 	r := remove(t, m, "personal")
-	if r.err == nil || !strings.Contains(r.err.Error(), "blocked by the test") || !strings.Contains(r.err.Error(), "repeat the call") {
+	if r.err == nil || !strings.Contains(r.err.Error(), "could not delete the archive") || !strings.Contains(r.err.Error(), repeatOrTell) {
 		t.Fatalf("Remove = %+v, %v; want the error of the delete", r.res, r.err)
+	}
+	// What the database said is for the log, not for the agent.
+	if strings.Contains(r.err.Error(), "blocked by the test") || !strings.Contains(buf.String(), "blocked by the test") {
+		t.Errorf("the database's words: in the error %q, in the log:\n%s", r.err, buf.String())
 	}
 	m.mu.Lock()
 	a := m.accounts["personal"]
@@ -578,10 +627,16 @@ func TestRemoveWhenTheArchiveCannotBeDeleted(t *testing.T) {
 func TestRemoveWhenTheDeviceCannotBeDeleted(t *testing.T) {
 	fn := &fakeNet{}
 	m, f, lift := removeFixtureRefusing(t, fn, "store.db", "whatsmeow_device")
+	var buf bytes.Buffer
+	m.log = debugLog(&buf)
 
 	r := remove(t, m, "personal")
-	if r.err == nil || !strings.Contains(r.err.Error(), "could not delete the keys of the device") || !strings.Contains(r.err.Error(), "blocked by the test") {
+	if r.err == nil || !strings.Contains(r.err.Error(), "could not delete the keys of the device") || !strings.Contains(r.err.Error(), repeatOrTell) {
 		t.Fatalf("Remove = %+v, %v; want the error of the delete", r.res, r.err)
+	}
+	// What the database said is for the log, not for the agent.
+	if strings.Contains(r.err.Error(), "blocked by the test") || !strings.Contains(buf.String(), "blocked by the test") {
+		t.Errorf("the database's words: in the error %q, in the log:\n%s", r.err, buf.String())
 	}
 	m.wg.Wait()
 	if got := archiveOf(t, f)["personal"]; got != [2]int{1, 2} {
@@ -593,7 +648,7 @@ func TestRemoveWhenTheDeviceCannotBeDeleted(t *testing.T) {
 	m.mu.Lock()
 	cli := m.accounts["personal"].cli
 	m.mu.Unlock()
-	if got := infoOf(m, "personal"); got.Status != StatusReconnecting || cli == nil || cli.Store.Deleted {
+	if got := infoOf(m, "personal"); got.Status != StatusReconnecting || cli == nil || deviceDeleted(cli) {
 		t.Errorf("account %+v: want it with its device, reconnecting", got)
 	}
 	if n := countCalls(fn, "connect "+personalPhone); n != 2 {
@@ -800,5 +855,48 @@ func TestRemoveRaceWithAdd(t *testing.T) {
 			t.Fatalf("round %d: the account is still there after the remove", round)
 		}
 		requireEnded(t, m)
+	}
+}
+
+// TestSignalDoesNotCutARemoveInFlight: the daemon's ctx ends with a signal, but a
+// remove that is unlinking the device goes on to the end, the archive's deletion
+// too: the Manager ends on Close alone, which the daemon calls once its server has
+// waited for the calls.
+func TestSignalDoesNotCutARemoveInFlight(t *testing.T) {
+	ctx, signal := context.WithCancel(context.Background())
+	f := newFixture(t)
+	f.account(t, "personal", personalPhone)
+	f.devices(t, map[string]string{personalPhone: ""})
+	seedArchive(t, f, "personal")
+	entered, release := make(chan struct{}), make(chan struct{})
+	fn := &fakeNet{connected: map[string]bool{personalPhone: true}, logoutHold: func(*whatsmeow.Client) {
+		close(entered)
+		<-release
+	}}
+	m := f.startWith(t, ctx, fn.network(readyGlobals()))
+	m.wg.Wait()
+
+	res := removeAsync(context.Background(), m, "personal")
+	select {
+	case <-entered: // the Logout is under way
+	case <-time.After(5 * time.Second):
+		t.Fatal("the remove did not reach the Logout")
+	}
+	signal()
+	if m.ctx.Err() != nil {
+		t.Error("the signal ended the Manager's context")
+	}
+	close(release)
+	if r := removed(t, res); r.err != nil || r.res.Hint != "" {
+		t.Fatalf("Remove = %+v, %v; want it done in spite of the signal", r.res, r.err)
+	}
+	if _, there := archiveOf(t, f)["personal"]; there || hasAccount(m, "personal") {
+		t.Error("the account is still there")
+	}
+	if got := storedDevices(t, m); len(got) != 0 {
+		t.Errorf("devices %v, want none", got)
+	}
+	if err := m.Close(); err != nil || m.ctx.Err() == nil {
+		t.Errorf("Close = %v, context ended: %v", err, m.ctx.Err() != nil)
 	}
 }

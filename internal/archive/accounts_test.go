@@ -188,7 +188,7 @@ func TestAddAccountTimestamps(t *testing.T) {
 
 // seed gives nick an account with 2 chats, 3 messages (2 with text, so 2
 // FTS rows) and 1 queued history notification, written straight in SQL: the
-// M2 write methods do not exist yet.
+// write methods for them do not exist yet.
 func seed(t *testing.T, db *DB, nick string) {
 	t.Helper()
 	if err := db.AddAccount(context.Background(), nick); err != nil {
@@ -518,7 +518,7 @@ func fileSize(t *testing.T, p string) int64 {
 }
 
 // TestHistoryQueueKeyedByMessage: a notification redelivered after a crash
-// (plan 7.2) is queued once per account, and the key also serves the
+// is queued once per account, and the key also serves the
 // foreign key, so the cascade of DeleteAccount does not scan the queue.
 func TestHistoryQueueKeyedByMessage(t *testing.T) {
 	db := openTemp(t)

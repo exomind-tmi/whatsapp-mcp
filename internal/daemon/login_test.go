@@ -452,7 +452,7 @@ func TestLoginBackendError(t *testing.T) {
 }
 
 // TestLoginKeepsTheNonceOutOfTheLog: no request, good or bad, leaves the
-// nonce or the query in the log (plan 10).
+// nonce or the query in the log: it is the capability to link the account.
 func TestLoginKeepsTheNonceOutOfTheLog(t *testing.T) {
 	s := newLoginServer(t)
 	const other = "T3RoZXJOb25jZUFiQ2RFZg"

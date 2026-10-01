@@ -175,10 +175,19 @@ func withQRImage(out ManageOut, png []byte) (*mcp.CallToolResult, ManageOut, err
 
 // repairStep is the next_step an account's status calls for, or "" when
 // add cannot help: a ban that has not ended is refused by add, and an
-// outdated client needs a new build instead.
+// outdated client needs a new build instead. An account that waits for the
+// link add has handed out is not re-linked: another add ends that link, and the
+// page of the link is what starts the linking. A pairing that is running has
+// nothing to be told: it is no problem, and the add that began it said how to
+// follow it and when to start it again.
 func repairStep(a wa.AccountInfo, now time.Time) string {
 	call := "manage-accounts action=add account_id=" + a.Nick
 	switch a.Status {
+	case wa.StatusLinking:
+		if a.LoginPending {
+			return "open the login_url that add returned for " + a.Nick + " (in Claude Code, which has no browser, call " + call +
+				" phone=<number> for a pairing code instead), or, if the link is lost, call " + call + " again for a new link (the old one stops working)"
+		}
 	case wa.StatusNeedsLink:
 		return call + " — re-link, the message archive is kept"
 	case wa.StatusReplaced:

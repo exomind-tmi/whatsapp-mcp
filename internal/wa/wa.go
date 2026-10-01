@@ -29,9 +29,14 @@ type AccountInfo struct {
 	PushName  string
 	Chats     int // archived chats and messages of the account
 	Messages  int
+
+	// LoginPending is set with the status linking when no pairing is running: add
+	// has handed out a login link and its page has not been opened. Only Accounts
+	// sets it.
+	LoginPending bool
 }
 
-// LinkRequest is a call of the add tool (plan 5.3). Phone and QRImage are two
+// LinkRequest is a call of the add tool. Phone and QRImage are two
 // ways to link that exclude each other; with neither, the answer is a link to
 // a local QR page.
 type LinkRequest struct {

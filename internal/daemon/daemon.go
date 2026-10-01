@@ -28,9 +28,22 @@ const (
 	shutdownTimeout = 30 * time.Second
 )
 
+// Option changes how Run builds the daemon, for tests that run it in-process.
+type Option func(*options)
+
+type options struct{ offline bool }
+
+// WithoutWhatsApp makes the account manager never reach WhatsApp: no version
+// check, no connection (wa.Config.Offline).
+func WithoutWhatsApp() Option { return func(o *options) { o.offline = true } }
+
 // Run serves until ctx is cancelled or /admin/stop is called. Losing the
 // lock race is not an error: another daemon is already serving.
-func Run(ctx context.Context, h home.Home, version string) error {
+func Run(ctx context.Context, h home.Home, version string, opts ...Option) error {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	lock, lockErr := acquire(ctx, h.LockFile())
 	if lockErr == nil {
 		defer lock.Unlock()
@@ -51,7 +64,7 @@ func Run(ctx context.Context, h home.Home, version string) error {
 	case lockErr != nil:
 		err = fmt.Errorf("lock: %w", lockErr)
 	default:
-		err = run(ctx, h, version, log)
+		err = run(ctx, h, version, log, o)
 	}
 	if err != nil {
 		log.Error("daemon failed", "err", err)
@@ -62,9 +75,9 @@ func Run(ctx context.Context, h home.Home, version string) error {
 }
 
 // run serves while the caller holds the lock.
-func run(ctx context.Context, h home.Home, version string, log *slog.Logger) error {
+func run(ctx context.Context, h home.Home, version string, log *slog.Logger, o options) error {
 	// Deferred first so it runs after the WA and archive close and just
-	// before the unlock (plan 4.4). A shim waiting for daemon.json to
+	// before the unlock. A shim waiting for daemon.json to
 	// vanish then finds the lock free within its 5 s retry.
 	defer func() {
 		if err := h.RemoveDaemonInfo(); err != nil {
@@ -83,7 +96,7 @@ func run(ctx context.Context, h home.Home, version string, log *slog.Logger) err
 	}
 	defer db.Close()
 
-	// Listen before building the Manager: the login pages it hands out (M1)
+	// Listen before building the Manager: the login pages it hands out
 	// live on this port. Serve closes ln; the defer covers a failure before.
 	// Serving starts only once the Manager is built (see wa.Manager.load).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -98,11 +111,12 @@ func run(ctx context.Context, h home.Home, version string, log *slog.Logger) err
 		StorePath: h.StoreDB(),
 		Archive:   db,
 		BaseURL:   fmt.Sprintf("http://127.0.0.1:%d", port),
+		Offline:   o.offline,
 	})
 	if err != nil {
 		return err
 	}
-	defer func() { // after srv.Shutdown below, before db.Close (plan 4.4)
+	defer func() { // after srv.Shutdown below, before db.Close
 		if err := accounts.Close(); err != nil {
 			log.Warn("close accounts", "err", err)
 		}

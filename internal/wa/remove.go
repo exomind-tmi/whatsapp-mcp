@@ -19,10 +19,18 @@ const removeDeviceHint = "remove the device on the phone manually: WhatsApp → 
 // away and has not yet deleted its archive: the call failed, was cancelled or gave up
 // waiting. list sends a needs_link account to add, which links it again and keeps the
 // archive, and a user who asked to forget the account must be told of the other way
-// out. A restart forgets it, and the account is then as if its keys were lost
-// (noKeysReason).
+// out. Finishing the removal deletes the archive for good, so, as for
+// differentNumberReason, the agent is told to ask the user first: it may find this
+// reason long after the call, and not know that the user still wants the removal. A
+// restart forgets it, and the account is then as if its keys were lost (noKeysReason).
 const removalInterruptedReason = "the removal was interrupted: the device is unlinked and the message archive is not deleted yet; " +
-	"call remove again to finish, or add to link the account again"
+	"to finish it call remove again (it deletes the message archive: ask the user first), or call add to link the account again (the archive is kept)"
+
+// repeatOrTell ends the error of a remove that failed on what only the log tells (the
+// database's words). A failure that stays, a full disk or a scanner that holds the
+// file, would have the agent repeat the call without end, so after one repeat it is
+// sent to the user.
+const repeatOrTell = "repeat the call; if it fails again, stop and tell the user (the details are in the daemon log)"
 
 // The answers of a remove that has waited abortWait for what it cancelled or found
 // going on, and that has erased nothing: the archive and the account are as they were.
@@ -39,7 +47,7 @@ type unlink struct {
 	err  error         // why a device is still there; written before done is closed
 }
 
-// Remove forgets the account (Anton's decision of 2026-10-01, plan 6.5): it
+// Remove forgets the account: it
 // unlinks the account's device, deletes its archive from this computer and drops
 // the account, which frees its number for another. Downloaded files stay. The
 // steps come in this order, each making the next safe:
@@ -138,8 +146,9 @@ func (m *Manager) removeTaken(ctx context.Context, a *account) (string, error) {
 	case errors.Is(err, archive.ErrNotScrubbed):
 		m.log.Warn("the archive of the removed account may have left copies in archive.db", "account", a.nick, "err", err)
 	default:
+		// The details, the driver's words, are for the log.
 		m.log.Warn("delete the archive of the removed account", "account", a.nick, "err", err)
-		return "", fmt.Errorf("could not delete the archive of account %q, which stays as it was; repeat the call: %w", a.nick, err)
+		return "", fmt.Errorf("could not delete the archive of account %q, which stays as it was; %s", a.nick, repeatOrTell)
 	}
 	m.mu.Lock()
 	hint := a.removeHint
@@ -246,7 +255,10 @@ func (m *Manager) dropDevices(nick string, clients []*whatsmeow.Client) (hint st
 		m.log.Warn("clean up store.db after the removed device; copies of its keys may stay in store.db or its WAL until the next checkpoint", "err", err)
 	}
 	if err := errors.Join(errs...); err != nil {
-		return hint, fmt.Errorf("could not delete the keys of the device from this computer: %w", err)
+		// The details, the database's words, are for the log; the caller, an agent,
+		// is told only that the device is still there.
+		m.log.Warn("delete the keys of the device", "account", nick, "err", err)
+		return hint, errors.New("could not delete the keys of the device from this computer; " + repeatOrTell)
 	}
 	return hint, nil
 }

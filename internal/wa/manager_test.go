@@ -68,10 +68,39 @@ type fakeQR struct {
 	ch  chan whatsmeow.QRChannelItem
 }
 
+// deviceMu orders the reads and the writes that goroutines of a test make of
+// the ID and the Deleted of a client's store.Device, which whatsmeow gives no
+// lock of its own: the fake network's connects, from the goroutines of the
+// Manager, read them while a scan saves the device and a Delete drops it. Every
+// access in a test goes through deviceID, deviceDeleted, saveDevice and
+// deleteStored, and the Manager's own Delete through the network's seam.
+var deviceMu sync.RWMutex
+
+func deviceID(cli *whatsmeow.Client) *types.JID {
+	deviceMu.RLock()
+	defer deviceMu.RUnlock()
+	return cli.Store.ID
+}
+
+func deviceDeleted(cli *whatsmeow.Client) bool {
+	deviceMu.RLock()
+	defer deviceMu.RUnlock()
+	return cli.Store.Deleted
+}
+
+// deleteStored deletes cli's device from store.db, as whatsmeow's Logout and
+// its handling of LoggedOut do. The lock is held through the DELETE, so a hook
+// that runs inside it may change the device without it.
+func deleteStored(ctx context.Context, cli *whatsmeow.Client) error {
+	deviceMu.Lock()
+	defer deviceMu.Unlock()
+	return cli.Store.Delete(ctx)
+}
+
 // phoneOf names a client in the calls: its phone, or "pairing" before it
 // has a device ID.
 func phoneOf(cli *whatsmeow.Client) string {
-	if id := cli.Store.ID; id != nil {
+	if id := deviceID(cli); id != nil {
 		return id.User
 	}
 	return "pairing"
@@ -88,7 +117,7 @@ func (f *fakeNet) network(g *waGlobals) network {
 		globals:   g,
 		retryStep: time.Millisecond,
 		connect: func(cli *whatsmeow.Client) error {
-			if cli.Store.Deleted { // as whatsmeow's, before it dials (client.go:548)
+			if deviceDeleted(cli) { // as whatsmeow's, before it dials (client.go:548)
 				return store.ErrDeviceDeleted
 			}
 			if f.hold != nil {
@@ -121,7 +150,7 @@ func (f *fakeNet) network(g *waGlobals) network {
 			connected := f.connected[phone]
 			f.mu.Unlock()
 			switch {
-			case cli.Store.ID == nil:
+			case deviceID(cli) == nil:
 				return whatsmeow.ErrNotLoggedIn
 			case !connected:
 				return whatsmeow.ErrNotConnected
@@ -131,8 +160,9 @@ func (f *fakeNet) network(g *waGlobals) network {
 			case f.logoutErr != nil:
 				return f.logoutErr
 			}
-			return cli.Store.Delete(ctx)
+			return deleteStored(ctx, cli)
 		},
+		deleteDevice: func(cli *whatsmeow.Client, ctx context.Context) error { return deleteStored(ctx, cli) },
 		qrChannel: func(cli *whatsmeow.Client, ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -258,7 +288,9 @@ func (f *fixture) devices(t *testing.T, pushNames map[string]string) {
 // saveDevice gives d the ID jid and saves it, as a pairing does.
 func saveDevice(t *testing.T, d *store.Device, jid types.JID) {
 	t.Helper()
+	deviceMu.Lock()
 	d.ID = &jid
+	deviceMu.Unlock()
 	d.Account = &waAdv.ADVSignedDeviceIdentity{
 		Details:             []byte{1},
 		AccountSignature:    make([]byte, 64),
@@ -272,7 +304,13 @@ func saveDevice(t *testing.T, d *store.Device, jid types.JID) {
 
 func (f *fixture) start(t *testing.T, net network) *Manager {
 	t.Helper()
-	m, err := newManager(context.Background(), Config{Log: f.log, StorePath: f.storePath(), Archive: f.db, BaseURL: "http://127.0.0.1:1"}, net)
+	return f.startWith(t, context.Background(), net)
+}
+
+// startWith is start with the ctx the daemon would pass, which a signal cancels.
+func (f *fixture) startWith(t *testing.T, ctx context.Context, net network) *Manager {
+	t.Helper()
+	m, err := newManager(ctx, Config{Log: f.log, StorePath: f.storePath(), Archive: f.db, BaseURL: "http://127.0.0.1:1"}, net)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,9 +367,68 @@ func TestManagerLoad(t *testing.T) {
 
 	cli := m.accounts["personal"].cli
 	if cli.BackgroundEventCtx != m.ctx || !cli.InitialAutoReconnect || !cli.SynchronousAck ||
-		!cli.EnableDecryptedEventBuffer || !cli.AutomaticMessageRerequestFromPhone ||
+		!cli.AutomaticMessageRerequestFromPhone ||
 		!cli.ManualHistorySyncDownload || !cli.DisableManualHistorySyncReceipt || cli.PrePairCallback != nil {
-		t.Errorf("client settings differ from plan 6.2: %+v", cli)
+		t.Errorf("client settings are not the expected ones: %+v", cli)
+	}
+	// The decrypted event buffer would write the text of each incoming message
+	// into store.db, where nothing stores messages yet.
+	if cli.EnableDecryptedEventBuffer {
+		t.Error("the decrypted event buffer is on: the plaintext of messages would pass through store.db")
+	}
+}
+
+// TestManagerLoadLogsOrphansByCount: the devices that the sweep deletes are
+// told to the log as a count, in a warning, as the keys are gone for good, and
+// never by number: no JID in the log. The ones that cannot be deleted are counted
+// too, with the database's reason. With no orphan there is nothing to say.
+func TestManagerLoadLogsOrphansByCount(t *testing.T) {
+	const orphans = "70000000008 70000000009"
+	for _, tc := range []struct {
+		name   string
+		phones map[string]string
+		block  bool // deletes from whatsmeow_device are refused
+		want   []string
+	}{
+		{"deleted", map[string]string{"70000000001": "", "70000000008": "", "70000000009": ""}, false,
+			[]string{"level=WARN", "deleted=2", "failed=0"}},
+		{"refused", map[string]string{"70000000001": "", "70000000008": "", "70000000009": ""}, true,
+			[]string{"level=WARN", "deleted=0", "failed=2", "blocked by the test"}},
+		{"none", map[string]string{"70000000001": ""}, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.account(t, "personal", "70000000001")
+			f.devices(t, tc.phones)
+			if tc.block {
+				f.storeExec(t, `CREATE TRIGGER test_refuse BEFORE DELETE ON whatsmeow_device BEGIN SELECT RAISE(ABORT, 'blocked by the test'); END`)
+			}
+			var buf bytes.Buffer
+			f.log = debugLog(&buf)
+			m := f.start(t, (&fakeNet{}).network(readyGlobals()))
+			m.wg.Wait()
+			m.Close()
+
+			var line string
+			for _, l := range strings.Split(buf.String(), "\n") {
+				if strings.Contains(l, "no account points to") {
+					line = l
+				}
+			}
+			if tc.want == nil && line != "" {
+				t.Errorf("no device is an orphan, and the log says so:\n%s", line)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(line, want) {
+					t.Errorf("the log line %q lacks %q", line, want)
+				}
+			}
+			for _, phone := range strings.Fields(orphans + " 70000000001") {
+				if strings.Contains(buf.String(), phone) {
+					t.Errorf("the number %s is in the log:\n%s", phone, buf.String())
+				}
+			}
+		})
 	}
 }
 
@@ -367,7 +464,7 @@ func TestManagerEvents(t *testing.T) {
 		}
 	}
 
-	// History is neither stored nor shown in the log until M2.
+	// History is neither stored nor shown in the log yet.
 	history := &events.Message{Message: &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
 		HistorySyncNotification: &waE2E.HistorySyncNotification{
 			SyncType:                          waE2E.HistorySyncType_INITIAL_BOOTSTRAP.Enum(),

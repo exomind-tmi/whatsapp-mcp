@@ -57,7 +57,7 @@ func (m *Manager) issueCode(ctx context.Context, nick string, s *pairSession, di
 	if s.over() { // it ended while the request was in flight: a code for nothing
 		return LinkTicket{}, m.abort(ctx, s, "")
 	}
-	m.log.Info("pairing code issued", "account", nick) // never the code or the number (plan 10)
+	m.log.Info("pairing code issued", "account", nick) // never the code or the number
 	return LinkTicket{PairCode: code, ExpiresAt: s.window}, nil
 }
 

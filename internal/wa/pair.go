@@ -2,6 +2,7 @@ package wa
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -98,10 +99,10 @@ type pairStatus struct {
 	Hint    string    // for the user, even on success
 }
 
-// pairSession links a new device to an account by QR code (plan 6.3), shown
+// pairSession links a new device to an account by QR code, shown
 // on a login page or, with kindChat, as an image in the chat, or, with
 // kindPhone, replaced by a pairing code that the session's client asks for once
-// the first QR code is out (plan 5.3). It runs on the Manager's ctx, not the
+// the first QR code is out. It runs on the Manager's ctx, not the
 // request's: a page reload or the next add finds it alive.
 type pairSession struct {
 	kind   pairKind
@@ -260,7 +261,9 @@ func (m *Manager) newPairing(a *account, kind pairKind) (*pairSession, error) {
 	ch, err := m.net.qrChannel(s.cli, ctx)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("start linking: %w", err)
+		// For the log, not the agent that is told: see loginReason.
+		m.log.Warn("start linking", "account", a.nick, "err", err)
+		return nil, errors.New("could not start linking; call add again")
 	}
 	s.ch = ch
 	return s, nil
@@ -270,7 +273,7 @@ func (m *Manager) newPairing(a *account, kind pairKind) (*pairSession, error) {
 // before it saves the new device (pair.go:204 vs 226): the account is bound
 // to its device here, so a crash leaves no device without one (see load).
 // A relink must keep the account's number; the archive is keyed by nick. A
-// number belongs to one account (Anton's decision of 2026-10-01).
+// number belongs to one account, by design.
 func (m *Manager) prePair(a *account, s *pairSession) func(types.JID, string, string) bool {
 	return func(jid types.JID, _, _ string) bool {
 		prev, refusal := m.claimPhone(a, jid.User)
@@ -424,7 +427,7 @@ func (m *Manager) readQR(a *account, s *pairSession) pairEnd {
 		case whatsmeow.QRChannelEventCode:
 			now := time.Now()
 			if !shown {
-				m.log.Info("linking: QR code ready", "account", a.nick) // never the code itself (plan 10)
+				m.log.Info("linking: QR code ready", "account", a.nick) // never the code itself: whoever has it can link an account
 				s.window = now.Add(windowFor(it.Timeout))               // before markCoded, as the field says
 			}
 			shown = true
@@ -453,7 +456,10 @@ func (m *Manager) readQR(a *account, s *pairSession) pairEnd {
 			if refusal := s.refused(); refusal != "" {
 				return fail(refusal)
 			}
-			return fail(fmt.Sprintf("linking failed: %v; call add again", it.Error))
+			// What went wrong is for the log: it is whatsmeow's or the database's
+			// own words, and the reason is shown to the agent and the user.
+			m.log.Warn("linking: the pairing failed", "account", a.nick, "err", it.Error)
+			return fail("linking failed; call add again")
 		case whatsmeow.QRChannelErrUnexpectedEvent.Event:
 			// Connected, ConnectFailure, LoggedOut or TemporaryBan
 			// (qrchan.go:198-199); our handler, called first, may have put

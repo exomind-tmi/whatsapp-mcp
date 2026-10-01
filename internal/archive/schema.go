@@ -3,7 +3,7 @@ package archive
 // migrations[i] takes the schema from version i to i+1, so SchemaVersion is
 // simply how many there are. Until the first release v1 is still edited in
 // place; after it a released step is never changed, the next one is appended
-// (plan 14: backups before migrating arrive together with v2). An array, not
+// (backups before migrating arrive together with v2). An array, not
 // a slice, so that its length is a constant. A step runs with foreign_keys
 // off (see migrate), so it may rebuild a table others reference.
 var migrations = [...]string{schemaV1}
@@ -11,14 +11,14 @@ var migrations = [...]string{schemaV1}
 // SchemaVersion is the newest PRAGMA user_version this build understands.
 const SchemaVersion = len(migrations)
 
-// schemaV1 is the whole archive of plan 8. Everything an account owns
+// schemaV1 is the whole archive. Everything an account owns
 // references accounts(nick) with ON DELETE CASCADE, so DeleteAccount is a
 // single DELETE; messages_fts has no foreign key and is cleared by the
 // messages_ad trigger, which SQLite fires for cascaded deletes too. STRICT
 // makes a wrongly bound value (a time.Time, which the driver sends as TEXT,
 // in an INTEGER column) an error instead of a row that sorts wrong; it can
 // only be added later by rebuilding the table. messages_au skips updates that
-// leave the text as it was (the upsert of plan 8 sets text even onto a
+// leave the text as it was (the upsert sets text even onto a
 // placeholder an edit already filled), which would only pile up FTS
 // tombstones.
 //

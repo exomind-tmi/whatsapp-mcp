@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-// loginTTL is how long a login link works (plan 5.3). It is a window, not a
+// loginTTL is how long a login link works. It is a window, not a
 // single use: a reload of the page, which carries the nonce, must work.
 const loginTTL = 10 * time.Minute
 
-// nonceBytes makes the nonce 128 bits (plan 10).
+// nonceBytes makes the nonce 128 bits, too many to guess.
 const nonceBytes = 16
 
 // absentNonce is what a nonce is compared with when the nick has none, so
@@ -36,6 +36,7 @@ type loginNonce struct {
 	value   string
 	expires time.Time // the end of the window, as the add tool tells it; never changes
 	until   time.Time // when the nonce stops working: expires, or later, see extend; guarded by loginNonces.mu
+	opened  bool      // the link's page has polled and its first call has decided; guarded by loginNonces.mu
 
 	// lock is held while the first poll decides and starts the pairing. A
 	// channel of one, not a mutex, so that a request can stop waiting for it.
@@ -128,6 +129,25 @@ func (n *loginNonces) live(nick string, rec *loginNonce) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.byNick[nick] == rec && n.now().Before(rec.until)
+}
+
+// pending reports whether nick has a link that works and whose page has not been
+// opened yet: the account is waiting for the user to open it. A link whose page
+// has polled is the page's pairing's business, whatever has become of it.
+func (n *loginNonces) pending(nick string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	rec := n.byNick[nick]
+	return rec != nil && !rec.opened && n.now().Before(rec.until)
+}
+
+// open records that rec's page has polled and decided, if rec is still nick's.
+func (n *loginNonces) open(nick string, rec *loginNonce) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.byNick[nick] == rec {
+		rec.opened = true
+	}
 }
 
 // extend lets rec work until at least until, if it is still nick's.

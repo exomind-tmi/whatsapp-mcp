@@ -100,7 +100,7 @@ type linkCase struct {
 	reason string // a part of the refusal
 }
 
-// linkCases is plan 6.4, a case for each status.
+// linkCases is the add policy, a case for each status.
 func linkCases() []linkCase {
 	banned := func(t *testing.T, m *Manager) {
 		m.accounts["personal"].cli.DangerousInternals().DispatchEvent(&events.TemporaryBan{Code: events.TempBanSentToTooManyPeople, Expire: time.Hour})
@@ -128,7 +128,7 @@ func linkCases() []linkCase {
 	}
 }
 
-// TestLinkOutcomes: Link applies the add policy of plan 6.4 to each status
+// TestLinkOutcomes: Link applies the add policy to each status
 // and starts no pairing: a link, a reconnect or a refusal comes out.
 func TestLinkOutcomes(t *testing.T) {
 	const link, reconnect, refuse = wantLink, wantReconnect, wantRefuse
@@ -231,7 +231,7 @@ func TestLinkRefusesWhatItCannotDo(t *testing.T) {
 }
 
 // TestLinkNeverLogsTheLink: neither the nonce nor the URL reaches the log,
-// through Link, Login or the refusals (plan 10).
+// through Link, Login or the refusals: it is the capability to link the account.
 func TestLinkNeverLogsTheLink(t *testing.T) {
 	f := newFixture(t)
 	var buf bytes.Buffer
@@ -546,7 +546,7 @@ func TestLoginWaitsForTheLockOnlyAsLongAsTheRequest(t *testing.T) {
 }
 
 // TestLinkReconnectEndsTheOldLink: an add that reconnects hands out no link,
-// and the link of the add before stops working (plan 6.3).
+// and the link of the add before stops working.
 func TestLinkReconnectEndsTheOldLink(t *testing.T) {
 	ctx := context.Background()
 	m, fn, _ := linkFixture(t)
@@ -642,6 +642,172 @@ func TestLoginOutlivesTheWindowOnceStarted(t *testing.T) {
 	c.t = tk2.ExpiresAt
 	if m.ValidLogin("other", n2) {
 		t.Error("an unopened link lives past its window")
+	}
+}
+
+// listed is nick's entry in Accounts, which is what list shows.
+func listed(t *testing.T, m *Manager, nick string) AccountInfo {
+	t.Helper()
+	for _, a := range m.Accounts(context.Background()) {
+		if a.Nick == nick {
+			return a
+		}
+	}
+	t.Fatalf("no account %q in the list", nick)
+	return AccountInfo{}
+}
+
+// TestAccountsShowALinkThatWaitsToBeOpened: the pairing of a login link starts
+// only when its page is opened, so right after add the account is needs_link to
+// the Manager; list says linking all the same, as an agent that finds needs_link
+// links the account again and ends the link that is waiting. It says so while the
+// link works and its page has not been opened; once the page has, the status is
+// the pairing's, and its failure is shown with its own reason though the link
+// still works.
+func TestAccountsShowALinkThatWaitsToBeOpened(t *testing.T) {
+	ctx := context.Background()
+	m, fn, _ := linkFixture(t)
+	c := &clock{time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)}
+	m.nonces.now = c.now
+	forceStatus(m, "personal", StatusNeedsLink)
+	needsLink := AccountInfo{Nick: "personal", Status: StatusNeedsLink, Reason: "forced by the test", Phone: "+70000000001"}
+	waiting := AccountInfo{Nick: "personal", Status: StatusLinking, Reason: loginPendingReason, Phone: "+70000000001", LoginPending: true}
+	if got := listed(t, m, "personal"); got != needsLink {
+		t.Fatalf("before the add: %+v, want %+v", got, needsLink)
+	}
+
+	tk, err := m.Link(ctx, LinkRequest{Nick: "personal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := listed(t, m, "personal"); got != waiting {
+		t.Errorf("after the add: %+v, want %+v", got, waiting)
+	}
+	if got := infoOf(m, "personal").Status; got != StatusNeedsLink {
+		t.Errorf("the account's own status is %s: what the add policy decides on must not change", got)
+	}
+	// The next add replaces the link, and the account waits for that one.
+	nonce := linkNonce(t, m, "personal")
+	if got := listed(t, m, "personal"); got != waiting {
+		t.Errorf("after the second add: %+v, want %+v", got, waiting)
+	}
+	c.t = tk.ExpiresAt.Add(-time.Second)
+	if got := listed(t, m, "personal"); got != waiting {
+		t.Errorf("a second before the end of the window: %+v, want %+v", got, waiting)
+	}
+	c.t = tk.ExpiresAt
+	if got := listed(t, m, "personal"); got != needsLink {
+		t.Errorf("at the end of the window: %+v, want the reason it had before", got)
+	}
+
+	// A new link, its page opened: the pairing is linking, with no reason.
+	c.t = tk.ExpiresAt.Add(time.Hour)
+	nonce = linkNonce(t, m, "personal")
+	if got := listed(t, m, "personal"); got != waiting {
+		t.Fatalf("after the third add: %+v, want %+v", got, waiting)
+	}
+	if st, err := m.Login(ctx, "personal", nonce); err != nil || st.State != "starting" {
+		t.Fatalf("Login = %+v, %v", st, err)
+	}
+	linking := AccountInfo{Nick: "personal", Status: StatusLinking, Phone: "+70000000001"}
+	if got := listed(t, m, "personal"); got != linking {
+		t.Errorf("after the page was opened: %+v, want %+v", got, linking)
+	}
+	// The pairing fails: the account says why, and not that a link is waiting,
+	// though the link still works.
+	s := sessOf(m, "personal")
+	fn.qr(t, 0).ch <- whatsmeow.QRChannelTimeout
+	<-s.done
+	failed := AccountInfo{Nick: "personal", Status: StatusNeedsLink, Reason: "could not get a QR code from WhatsApp; check the network and call add again", Phone: "+70000000001"}
+	if got := listed(t, m, "personal"); got != failed || !m.ValidLogin("personal", nonce) {
+		t.Errorf("after the pairing failed: %+v, want %+v (the link works: %v)", got, failed, m.ValidLogin("personal", nonce))
+	}
+}
+
+// TestAccountsDoNotShowALinkThatWasEnded: the link that waits is ended by the
+// next add that hands out none, whether it reconnects or pairs in the chat, and by
+// a remove; and a nick that has no link, or an account that is not needs_link, is
+// shown as it is.
+func TestAccountsDoNotShowALinkThatWasEnded(t *testing.T) {
+	ctx := context.Background()
+	m, fn, _ := linkFixture(t)
+	fn.firstCode = "2@one" // the pairing by code needs a first QR code
+	waits := func(nick string) bool { return listed(t, m, nick).LoginPending }
+
+	forceStatus(m, "personal", StatusNeedsLink)
+	linkNonce(t, m, "personal")
+	forceStatus(m, "personal", StatusReplaced)
+	if tk, err := m.Link(ctx, LinkRequest{Nick: "personal"}); err != nil || !tk.Reconnecting {
+		t.Fatalf("Link = %+v, %v; want a reconnect", tk, err)
+	}
+	m.wg.Wait()
+	if got := listed(t, m, "personal"); waits("personal") || got.Status != StatusReconnecting {
+		t.Errorf("after a reconnect: %+v", got)
+	}
+
+	linkNonce(t, m, "fresh")
+	if !waits("fresh") {
+		t.Fatal("a link that waits is not shown")
+	}
+	if _, err := m.Link(ctx, LinkRequest{Nick: "fresh", Phone: typedPhone}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listed(t, m, "fresh"); waits("fresh") || got.Status != StatusLinking || got.Reason != "" {
+		t.Errorf("after a pairing by code: %+v, want the pairing's linking", got)
+	}
+
+	linkNonce(t, m, "other")
+	if _, err := m.Remove(ctx, "other"); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range m.Accounts(ctx) {
+		if a.Nick == "other" {
+			t.Errorf("a removed account is listed: %+v", a)
+		}
+	}
+
+	// Not needs_link: the link, if one is left, is not what the account waits for.
+	forceStatus(m, "personal", StatusConnected)
+	m.nonces.issue("personal")
+	if got := listed(t, m, "personal"); got.Status != StatusConnected || got.LoginPending {
+		t.Errorf("a connected account with a link left: %+v", got)
+	}
+}
+
+// TestLinkHidesInternalErrors: an add that cannot start, because the database or
+// the library fails, tells the agent so in general; the details, a path or the
+// driver's words, are for the log.
+func TestLinkHidesInternalErrors(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	var buf bytes.Buffer
+	f.log = debugLog(&buf)
+	net := (&fakeNet{}).network(readyGlobals())
+	net.qrChannel = func(*whatsmeow.Client, context.Context) (<-chan whatsmeow.QRChannelItem, error) {
+		return nil, errors.New("sqlite: C:/secret/store.db is locked")
+	}
+	m := f.start(t, net)
+
+	for _, req := range []LinkRequest{{Nick: "chat", QRImage: true}, {Nick: "code", Phone: typedPhone}} {
+		_, err := m.Link(ctx, req)
+		if err == nil || err.Error() != "could not start linking; call add again" {
+			t.Errorf("Link %+v = %v, want the general error", req, err)
+		}
+	}
+	if !strings.Contains(buf.String(), "secret/store.db") {
+		t.Errorf("the detail is not in the log:\n%s", buf.String())
+	}
+
+	buf.Reset()
+	if err := f.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.Link(ctx, LinkRequest{Nick: "new"})
+	if err == nil || err.Error() != "could not create the account; call add again" {
+		t.Errorf("Link with archive.db failing = %v, want the general error", err)
+	}
+	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "closed") {
+		t.Errorf("the driver's words are not in the log:\n%s", buf.String())
 	}
 }
 

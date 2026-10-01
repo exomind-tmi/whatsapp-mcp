@@ -1,17 +1,20 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -48,16 +51,27 @@ func TestEnsureTokenKeepsExisting(t *testing.T) {
 	}
 }
 
-func TestMuxAuth(t *testing.T) {
-	stop := make(chan struct{})
-	srv := httptest.NewServer(newMux(muxDeps{
+// newMuxServer serves newMux, which answers only to its own port, so the
+// listener is made first.
+func newMuxServer(t *testing.T, stop chan<- struct{}) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(nil)
+	srv.Config.Handler = newMux(muxDeps{
 		version: "v1.2.3",
 		token:   "secret",
 		server:  tools.NewServer("v1.2.3", tools.Deps{WA: &toolstest.WA{}}),
 		stop:    stop,
 		log:     slog.New(slog.DiscardHandler),
-	}))
-	defer srv.Close()
+		port:    srv.Listener.Addr().(*net.TCPAddr).Port,
+	})
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestMuxAuth(t *testing.T) {
+	stop := make(chan struct{})
+	srv := newMuxServer(t, stop)
 
 	do := func(method, path, auth string) (int, string) {
 		req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(`{}`))
@@ -105,8 +119,86 @@ func TestMuxAuth(t *testing.T) {
 	do("POST", "/admin/stop", "Bearer secret") // a second stop must not panic
 }
 
-// TestRunLifecycle runs the real daemon in-process: lock, token, daemon.json,
-// a second daemon exits cleanly, and shutdown removes daemon.json.
+// TestMuxOnlyOwnHost: a page that reaches the daemon under a name of its own
+// (DNS rebinding) reads nothing, not the pid, the version and the proof of
+// /healthz, and stops nothing even with the token; the daemon's own two names,
+// which the shim and the client use, work.
+func TestMuxOnlyOwnHost(t *testing.T) {
+	stop := make(chan struct{})
+	srv := newMuxServer(t, stop)
+	port := strconv.Itoa(srv.Listener.Addr().(*net.TCPAddr).Port)
+	do := func(method, path, host string) (int, string) {
+		req, _ := http.NewRequest(method, srv.URL+path, nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		if host != "" {
+			req.Host = host
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+
+	for _, host := range []string{"evil.example", "evil.example:" + port, "127.0.0.1", "localhost", "127.0.0.2:" + port,
+		"127.0.0.1:" + port + ".evil.example", "[::1]:" + port, "0.0.0.0:" + port} {
+		for _, tc := range []struct{ method, path string }{
+			{"GET", "/healthz?nonce=n1"}, {"POST", "/admin/stop"}, {"POST", "/mcp"}, {"GET", "/login/personal?t=x"},
+		} {
+			code, body := do(tc.method, tc.path, host)
+			if code != http.StatusNotFound || strings.Contains(body, "v1.2.3") || strings.Contains(body, "proof") || strings.Contains(body, "pid") {
+				t.Errorf("%s %s with Host %q = %d %q, want the 404 and nothing of the daemon", tc.method, tc.path, host, code, body)
+			}
+		}
+	}
+	select {
+	case <-stop:
+		t.Fatal("a request under a foreign Host stopped the daemon")
+	default:
+	}
+
+	// A request line that names the host makes Go ignore the Host header.
+	for _, target := range []string{"/healthz?nonce=n1", "/admin/stop"} {
+		method := "GET"
+		if target == "/admin/stop" {
+			method = "POST"
+		}
+		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(conn, "%s http://127.0.0.1:%s%s HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Bearer secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", method, port, target)
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		conn.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("absolute-form %s %s = %d, want 404", method, target, resp.StatusCode)
+		}
+	}
+
+	for _, host := range []string{"", "127.0.0.1:" + port, "localhost:" + port, "LocalHost:" + port} {
+		if code, body := do("GET", "/healthz?nonce=n1", host); code != http.StatusOK || !strings.Contains(body, home.TokenProof("secret", "n1")) {
+			t.Errorf("/healthz with Host %q = %d %q", host, code, body)
+		}
+	}
+	if code, _ := do("POST", "/admin/stop", "localhost:"+port); code != http.StatusAccepted {
+		t.Errorf("/admin/stop with the daemon's own Host = %d, want 202", code)
+	}
+	select {
+	case <-stop:
+	case <-time.After(time.Second):
+		t.Error("stop not signalled by a request under the daemon's own Host")
+	}
+}
+
+// TestRunLifecycle runs the real daemon in-process, without WhatsApp: lock,
+// token, daemon.json, a second daemon exits cleanly, and shutdown removes
+// daemon.json.
 func TestRunLifecycle(t *testing.T) {
 	h := home.Home{Dir: testutil.TempDir(t)}
 	if err := h.Ensure(); err != nil {
@@ -114,7 +206,7 @@ func TestRunLifecycle(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, h, "v0.1.0") }()
+	go func() { done <- Run(ctx, h, "v0.1.0", WithoutWhatsApp()) }()
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -129,6 +221,8 @@ func TestRunLifecycle(t *testing.T) {
 	if _, err := h.ReadToken(); err != nil {
 		t.Fatalf("token: %v", err)
 	}
+	// The daemon of a test reaches no WhatsApp: its version check is the offline one.
+	testutil.WaitForLog(t, h.Log("daemon.log"), "never reaches WhatsApp")
 
 	// A second daemon loses the lock after its retry window and exits 0,
 	// leaving the winner's log alone even when it is due for rotation.
@@ -136,7 +230,7 @@ func TestRunLifecycle(t *testing.T) {
 	lf, _ := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0o600)
 	lf.Write(make([]byte, 10<<20+1))
 	lf.Close()
-	if err := Run(context.Background(), h, "v0.1.0"); err != nil {
+	if err := Run(context.Background(), h, "v0.1.0", WithoutWhatsApp()); err != nil {
 		t.Fatalf("second daemon: %v", err)
 	}
 	if _, err := os.Stat(logPath + ".1"); !os.IsNotExist(err) {
@@ -157,10 +251,9 @@ func TestRunLifecycle(t *testing.T) {
 	}
 }
 
-// TestRunIssuesLoginLink: the add tool of the real daemon hands out a link
-// to its own port, and the mux answers the link's path with no token. The
-// page opens, but its poll is not made: that would start a pairing on the
-// real network.
+// TestRunIssuesLoginLink: the add tool of the real daemon, which reaches no
+// WhatsApp, hands out a link to its own port, and the mux answers the link's
+// path with no token. The page opens without starting a pairing; its poll does.
 func TestRunIssuesLoginLink(t *testing.T) {
 	h := home.Home{Dir: testutil.TempDir(t)}
 	if err := h.Ensure(); err != nil {
@@ -168,7 +261,7 @@ func TestRunIssuesLoginLink(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, h, "v0.1.0") }()
+	go func() { done <- Run(ctx, h, "v0.1.0", WithoutWhatsApp()) }()
 	defer func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -185,6 +278,7 @@ func TestRunIssuesLoginLink(t *testing.T) {
 			t.Fatal("daemon.json not written")
 		}
 	}
+	testutil.WaitForLog(t, h.Log("daemon.log"), "never reaches WhatsApp") // it reaches no WhatsApp
 
 	cs, err := client.Connect(ctx, h, info.Port, "v0.1.0")
 	if err != nil {
@@ -212,14 +306,20 @@ func TestRunIssuesLoginLink(t *testing.T) {
 	if u.Scheme != "http" || u.Host != fmt.Sprintf("127.0.0.1:%d", info.Port) || u.Path != "/login/fresh" || len(nonce) != 22 {
 		t.Errorf("login URL %q: want the daemon's own port and a 128-bit nonce", out.LoginURL)
 	}
-	if acc := call(map[string]any{"action": "list"}).Accounts; len(acc) != 1 || acc[0].AccountID != "fresh" || acc[0].Status != "needs_link" {
+	// The pairing starts when the page is polled, but list says what the account
+	// waits for, and does not send the agent to link it again.
+	const waiting = "a login link was issued and not opened yet"
+	listed := call(map[string]any{"action": "list"})
+	if acc := listed.Accounts; len(acc) != 1 || acc[0].AccountID != "fresh" || acc[0].Status != "linking" || acc[0].Reason != waiting {
 		t.Errorf("accounts after add: %+v", acc)
+	}
+	if !strings.Contains(listed.NextStep, "login_url") || strings.Contains(listed.NextStep, "re-link") {
+		t.Errorf("list's next_step after add: %q", listed.NextStep)
 	}
 
 	// Under /login/ the mux asks for no token but a valid nonce on our own
 	// Host, with which the page opens (and starts no pairing: only its poll
-	// does, which this test leaves out as it would reach the real network);
-	// neither a wrong nonce nor another Host gets in.
+	// does, below); neither a wrong nonce nor another Host gets in.
 	for _, host := range []string{"", fmt.Sprintf("localhost:%d", info.Port)} {
 		req, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/login/fresh?t=%s", info.Port, nonce), nil)
 		if host != "" {
@@ -252,8 +352,22 @@ func TestRunIssuesLoginLink(t *testing.T) {
 			t.Errorf("GET %s with Host %q: %d, want 404", tc.path, tc.host, resp.StatusCode)
 		}
 	}
-	if acc := call(map[string]any{"action": "list"}).Accounts; acc[0].Status != "needs_link" {
+	if acc := call(map[string]any{"action": "list"}).Accounts; acc[0].Reason != waiting {
 		t.Errorf("a request started the pairing: %+v", acc)
+	}
+
+	// The poll starts it; with no WhatsApp the QR code never comes.
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/login/fresh/state?t=%s", info.Port, nonce))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"state":"starting"`) {
+		t.Errorf("the poll = %d %s, want the pairing started", resp.StatusCode, body)
+	}
+	if acc := call(map[string]any{"action": "list"}).Accounts; acc[0].Status != "linking" || acc[0].Reason != "" {
+		t.Errorf("after the poll: %+v, want the pairing's linking", acc)
 	}
 }
 
@@ -267,7 +381,7 @@ func TestRunManagerFails(t *testing.T) {
 	if err := os.Mkdir(h.StoreDB(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := Run(context.Background(), h, "v0.1.0"); err == nil || !strings.Contains(err.Error(), "store.db") {
+	if err := Run(context.Background(), h, "v0.1.0", WithoutWhatsApp()); err == nil || !strings.Contains(err.Error(), "store.db") {
 		t.Fatalf("Run = %v, want store.db's error", err)
 	}
 	if _, err := os.Stat(h.DaemonJSON()); !os.IsNotExist(err) {

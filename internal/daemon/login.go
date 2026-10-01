@@ -25,40 +25,29 @@ type loginBackend interface {
 	Login(ctx context.Context, nick, nonce string) (wa.LoginState, error)
 }
 
-// loginHandler serves the QR login page of plan 6.3 under /login/. It is
+// loginHandler serves the QR login page under /login/. It is
 // outside the bearer check, as a browser opens it: the nonce in the link,
-// which the add tool hands out, is the capability (plan 10). So that it
+// which the add tool hands out, is the capability. So that it
 // cannot be told from a wrong guess, every reason to refuse is the same 404.
 type loginHandler struct {
 	backend loginBackend
-	hosts   [2]string // the Host headers that reach the daemon itself
 	log     *slog.Logger
 }
 
-func newLoginHandler(b loginBackend, port int, log *slog.Logger) *loginHandler {
-	return &loginHandler{
-		backend: b,
-		hosts:   [2]string{fmt.Sprintf("127.0.0.1:%d", port), fmt.Sprintf("localhost:%d", port)},
-		log:     log,
-	}
+func newLoginHandler(b loginBackend, log *slog.Logger) *loginHandler {
+	return &loginHandler{backend: b, log: log}
 }
 
 // ServeHTTP handles /login/<nick>, the page, and /login/<nick>/state, the
-// page's poll. It writes no access log: the URL holds the nonce.
+// page's poll. It writes no access log: the URL holds the nonce. The Host of the
+// request is the daemon's own: the mux checks it for every endpoint
+// (onlyOwnHost).
 //
 // Only the poll starts the pairing, not the page: something that merely
 // fetches the link, a chat's link preview or a browser's prefetch, runs no
 // script, and must not start a pairing whose code then expires unseen.
 func (h *loginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setLoginHeaders(w.Header())
-	// A Host that is not ours is a DNS rebinding attempt: a web page that
-	// names the daemon by its own domain, which then reads the answer. A
-	// request line that carries the host itself makes Go ignore the header, so
-	// it is refused: a browser never sends one to an origin.
-	if r.URL.IsAbs() || !h.hostIsOurs(r.Host) {
-		http.NotFound(w, r)
-		return
-	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -93,11 +82,6 @@ func (h *loginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *loginHandler) hostIsOurs(host string) bool {
-	host = strings.ToLower(host)
-	return host == h.hosts[0] || host == h.hosts[1]
-}
-
 // parseLoginPath splits /login/<nick> and /login/<nick>/state; ok is false
 // for anything else, such as a nick that cannot exist. A path that needed
 // escaping is refused as it is: a nick has no character that does.
@@ -127,7 +111,7 @@ func (h *loginHandler) writeState(w http.ResponseWriter, nick string, st wa.Logi
 	if st.Code != "" {
 		png, err := qr.PNG(st.Code)
 		if err != nil {
-			h.log.Warn("draw the QR code", "account", nick, "err", err) // not the code (plan 10)
+			h.log.Warn("draw the QR code", "account", nick, "err", err) // not the code
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}

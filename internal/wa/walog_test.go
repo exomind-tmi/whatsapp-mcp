@@ -110,9 +110,41 @@ func TestWALogSummarisesNodes(t *testing.T) {
 	}
 }
 
+// TestWALogMasksJIDs: the JIDs that whatsmeow prints outside a node, its own
+// account's at Info and a correspondent's at Warn, do not reach daemon.log, whose
+// last lines the agent is shown when the daemon fails to start.
+func TestWALogMasksJIDs(t *testing.T) {
+	var buf bytes.Buffer
+	l := newWALog(debugLog(&buf), "Client")
+	own := types.NewADJID("79161234567", 0, 12)
+	l.Infof("Successfully paired %s", &own)
+	l.Warnf("Error decrypting message %s from %s: %v", "3EB0ABC", "79169876543:3@s.whatsapp.net in 120363025246125486@g.us", "no session")
+	l.Warnf("Failed to get LID for %s: %v", types.NewJID("79169876543", types.DefaultUserServer), "boom")
+	l.Warnf("Ignoring %s and %s and %s", "status@broadcast", "184467440737.1:2@lid", "5511987654321@hosted.lid")
+	l.Warnf("Unexpected own device notification sender %s", types.NewJID("12345-1600000000", types.GroupServer))
+
+	out := buf.String()
+	for _, leak := range []string{"79161234567", "79169876543", "120363025246125486", "184467440737", "5511987654321", "12345-1600000000"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("log shows %q:\n%s", leak, out)
+		}
+	}
+	for _, want := range []string{
+		`msg="Successfully paired <jid>@s.whatsapp.net"`,
+		`from <jid>@s.whatsapp.net in <jid>@g.us: no session`,
+		`Failed to get LID for <jid>@s.whatsapp.net: boom`,
+		`Ignoring status@broadcast and <jid>@lid and <jid>@hosted.lid`, // what is no number stays
+		`sender <jid>@g.us`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestWhatsmeowLogSources pins the whatsmeow source the clamps above rely
 // on: a module renamed, a new sub-logger or the QR logged elsewhere would
-// silently open them up after an update (plan 16). On failure, re-read the
+// silently open them up after an update. On failure, re-read the
 // changed lines and fix secretModules and secretDebug.
 func TestWhatsmeowLogSources(t *testing.T) {
 	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "go.mau.fi/whatsmeow").Output()

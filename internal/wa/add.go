@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// addAction is what add does with an account (plan 5.3, Anton's decision
-// of 2026-10-01).
+// addAction is what add does with an account.
 type addAction int
 
 const (
@@ -106,9 +105,8 @@ type admitted struct {
 	link    *loginNonce  // the login link, issued: for outcomePair with kindNone
 }
 
-// add starts the pairing of nick, as the login page does when it first polls
-// (plan 6.3): the session, or nil if the decision turned out to be a
-// reconnect. See admit.
+// add starts the pairing of nick, as the login page does when it first polls:
+// the session, or nil if the decision turned out to be a reconnect. See admit.
 func (m *Manager) add(ctx context.Context, nick string) (*pairSession, error) {
 	adm, err := m.admit(ctx, nick, kindPage, "")
 	return adm.sess, err
@@ -157,6 +155,21 @@ func (m *Manager) cancelPairing(ctx context.Context, nick string, prev *pairSess
 // is for a poll that was already under way then, or whose nonce an add without
 // a phone number issued while the one that began the pairing was starting it.
 var errNotPageSession = errors.New("the account is being linked by a pairing code or in the chat, not by a login page")
+
+// ensureRow makes nick's row in archive.db. A failure is told to the caller, an
+// agent, only in general: the details, the driver's words, are for the log. A
+// caller that has given up gets its own error.
+func (m *Manager) ensureRow(ctx context.Context, nick string) error {
+	err := m.db.AddAccount(ctx, nick)
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	m.log.Warn("create the account in archive.db", "account", nick, "err", err)
+	return errors.New("could not create the account; call add again")
+}
 
 // admit is the core of the add tool for nick: it refuses with the reason as
 // the error, reconnects the account's device, or finds that the account needs
@@ -217,7 +230,7 @@ func (m *Manager) admit(ctx context.Context, nick string, kind pairKind, user st
 	if !known {
 		// The account exists from now on: a pairing that fails leaves it
 		// needs_link, "not linked yet" after a restart.
-		if err := m.db.AddAccount(ctx, nick); err != nil {
+		if err := m.ensureRow(ctx, nick); err != nil {
 			return admitted{}, err
 		}
 	}
@@ -242,7 +255,7 @@ func (m *Manager) admit(ctx context.Context, nick string, kind pairKind, user st
 				m.mu.Unlock()
 				s.drop()
 				s, built = nil, nil
-				if err := m.db.AddAccount(ctx, nick); err != nil {
+				if err := m.ensureRow(ctx, nick); err != nil {
 					return admitted{}, err
 				}
 				continue

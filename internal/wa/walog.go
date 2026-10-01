@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
@@ -12,8 +13,8 @@ import (
 
 // secretModules log secrets at Debug: QRChannel the QR code itself
 // (qrchan.go:97), Recv and Send every node they pass (client.go:867, 971).
-// Their Debug never reaches the log, not even with WHATSAPP_MCP_LOG=debug
-// (plan 10); their sub-loggers inherit it. The names are whatsmeow's own
+// Their Debug never reaches the log, not even with WHATSAPP_MCP_LOG=debug;
+// their sub-loggers inherit it. The names are whatsmeow's own
 // (client.go:263-264, qrchan.go:235); TestWhatsmeowLogSources notices when
 // an update renames them.
 var secretModules = map[string]bool{"QRChannel": true, "Recv": true, "Send": true}
@@ -39,6 +40,11 @@ var nodeAttrs = []string{"id", "type", "xmlns", "code", "reason"}
 // reply to a query of ours, not a message or a pairing secret. A zerolog
 // logger must never go into a context handed to whatsmeow: its zerolog.Ctx
 // calls would bypass this adapter.
+//
+// A JID outside a node is masked in the finished line (maskJIDs): whatsmeow
+// prints the account's own at Info ("Successfully paired ...", pair.go:155) and
+// a correspondent's at Warn (message.go:415), and the last lines of daemon.log
+// reach the agent when the daemon fails to start (shim.startFailure).
 type waLogger struct {
 	log    *slog.Logger
 	module string
@@ -71,9 +77,18 @@ func (w *waLogger) Debugf(msg string, args ...any) {
 func (w *waLogger) logf(level slog.Level, msg string, args []any) {
 	ctx := context.Background()
 	if w.log.Enabled(ctx, level) {
-		w.log.Log(ctx, level, fmt.Sprintf(msg, redact(args)...), "sub", w.module)
+		w.log.Log(ctx, level, maskJIDs(fmt.Sprintf(msg, redact(args)...)), "sub", w.module)
 	}
 }
+
+// jidInText finds a JID in a formatted line: the user part, a phone number or an
+// id, with the agent and the device it may carry, and the server. whatsmeow's
+// servers are in types/jid.go ("hosted" also begins "hosted.lid", whose rest stays).
+var jidInText = regexp.MustCompile(`[0-9][0-9.:_-]*@(s\.whatsapp\.net|lid|g\.us|c\.us|broadcast|newsletter|hosted|bot|msgr|interop)\b`)
+
+// maskJIDs hides the user part of every JID in s, which is a phone number or
+// its stand-in, and keeps the server, which tells what kind it was.
+func maskJIDs(s string) string { return jidInText.ReplaceAllString(s, "<jid>@${1}") }
 
 // redact returns args with every node replaced by its summary; a fresh
 // slice, as the caller may own args.

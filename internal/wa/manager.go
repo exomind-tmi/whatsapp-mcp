@@ -40,6 +40,10 @@ type Config struct {
 	StorePath string // store.db
 	Archive   *archive.DB
 	BaseURL   string // the daemon's http://127.0.0.1:<port>, for the login pages
+
+	// Offline makes a Manager that never reaches WhatsApp (see offlineNetwork), for
+	// the tests of the packages above that run the daemon in-process.
+	Offline bool
 }
 
 // network is the part of the Manager that reaches WhatsApp's servers; tests
@@ -52,20 +56,27 @@ type network struct {
 	qrChannel  func(*whatsmeow.Client, context.Context) (<-chan whatsmeow.QRChannelItem, error)
 	pairPhone  func(cli *whatsmeow.Client, ctx context.Context, phone string, push bool, typ whatsmeow.PairClientType, name string) (string, error)
 	retryStep  time.Duration // the backoff added per failed connect
+
+	// deleteDevice is the one write of our own to the client's store.Device, whose
+	// ID and Deleted whatsmeow reads and writes without a lock. It is a seam, as the
+	// connects that read them are, so that a test's network takes the lock of its
+	// own around the write and the reads.
+	deleteDevice func(*whatsmeow.Client, context.Context) error
 }
 
 var liveNetwork = network{
-	globals:    globals,
-	connect:    (*whatsmeow.Client).Connect,
-	disconnect: (*whatsmeow.Client).Disconnect,
-	logout:     (*whatsmeow.Client).Logout,
-	qrChannel:  (*whatsmeow.Client).GetQRChannel,
-	pairPhone:  (*whatsmeow.Client).PairPhone,
-	retryStep:  2 * time.Second, // whatsmeow's own (client.go:634)
+	globals:      globals,
+	connect:      (*whatsmeow.Client).Connect,
+	disconnect:   (*whatsmeow.Client).Disconnect,
+	logout:       (*whatsmeow.Client).Logout,
+	qrChannel:    (*whatsmeow.Client).GetQRChannel,
+	pairPhone:    (*whatsmeow.Client).PairPhone,
+	retryStep:    2 * time.Second, // whatsmeow's own (client.go:634)
+	deleteDevice: func(cli *whatsmeow.Client, ctx context.Context) error { return cli.Store.Delete(ctx) },
 }
 
 // Manager owns the WhatsApp client of every account and keeps each one's
-// status in memory (plan 6.6).
+// status in memory (see next).
 type Manager struct {
 	log        *slog.Logger
 	db         *archive.DB
@@ -82,8 +93,11 @@ type Manager struct {
 	logoutWait time.Duration // the Logout of a device that is taken away: a removed account's, a relinked account's old one
 
 	// ctx is every client's BackgroundEventCtx: keepalive and whatsmeow's
-	// reconnects run on it (client.go:500-502, 583-584). It is the daemon's
-	// and ends on Close, as /admin/stop does not cancel the daemon's own.
+	// reconnects run on it (client.go:500-502, 583-584). It ends on Close alone,
+	// not with the ctx that NewManager got, which a signal cancels: a call in
+	// flight, a remove that has taken the device away and must delete the
+	// archive, is not to be cut by it. The daemon stops its server first, which
+	// waits for the calls, and closes the Manager after.
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // the connects and pairings; Add only under mu while !closed
@@ -135,7 +149,11 @@ func (a *account) owner() *whatsmeow.Client {
 // NewManager opens store.db, loads the accounts and connects those with a
 // device in the background. The daemon calls it before it serves (see load).
 func NewManager(ctx context.Context, cfg Config) (*Manager, error) {
-	return newManager(ctx, cfg, liveNetwork)
+	net := liveNetwork
+	if cfg.Offline {
+		net = offlineNetwork()
+	}
+	return newManager(ctx, cfg, net)
 }
 
 func newManager(ctx context.Context, cfg Config, net network) (*Manager, error) {
@@ -159,7 +177,7 @@ func newManager(ctx context.Context, cfg Config, net network) (*Manager, error) 
 		logoutWait: logoutWait,
 		accounts:   map[string]*account{},
 	}
-	m.ctx, m.cancel = context.WithCancel(ctx)
+	m.ctx, m.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	if err := m.load(ctx); err != nil {
 		m.cancel()
 		st.Close()
@@ -224,11 +242,25 @@ func (m *Manager) load(ctx context.Context) error {
 		a.cli = m.newClient(a, dev)
 	}
 
-	for jid, d := range byJID {
-		m.log.Info("deleting an orphan device from store.db", "jid", jid)
+	// Only the count is logged: no JID, no number.
+	var deleted int
+	var errs []error
+	for _, d := range byJID {
 		if err := m.store.DeleteDevice(ctx, d); err != nil {
-			m.log.Warn("delete orphan device", "jid", jid, "err", err)
+			errs = append(errs, err)
+			continue
 		}
+		deleted++
+	}
+	if len(byJID) > 0 {
+		// A warning, as the keys are gone for good: most often the orphan of a
+		// relink cut short, but also what is left when archive.db has been deleted
+		// or restored from a backup, which unlinks no phone.
+		attrs := []any{"deleted", deleted, "failed", len(errs)}
+		if len(errs) > 0 {
+			attrs = append(attrs, "err", errors.Join(errs...))
+		}
+		m.log.Warn("deleted devices from store.db that no account points to; the phone may still list them", attrs...)
 	}
 	// What the devices deleted before leave behind: the orphans just now, devices
 	// whatsmeow deleted on LoggedOut, a remove cut short by a crash.
@@ -238,19 +270,25 @@ func (m *Manager) load(ctx context.Context) error {
 	return nil
 }
 
-// newClient is the one place that builds a client, with the settings of
-// plan 6.2; pairing builds its client here too, since that client stays on
+// newClient is the one place that builds a client, with the settings of a
+// permanent one; pairing builds its client here too, since that client stays on
 // once linked, and adds its PrePairCallback.
 func (m *Manager) newClient(a *account, dev *store.Device) *whatsmeow.Client {
 	cli := whatsmeow.NewClient(dev, newWALog(m.log.With("account", a.nick), "Client"))
 	cli.BackgroundEventCtx = m.ctx
 	cli.InitialAutoReconnect = true // a laptop offline at start
 	cli.SynchronousAck = true
-	cli.EnableDecryptedEventBuffer = true
 	cli.AutomaticMessageRerequestFromPhone = true
-	// History is not stored until M2 (Anton's decision): no history blob is
-	// downloaded and no hist_sync receipt is sent (message.go:892-906); the
-	// notification itself is still acked like any message (message.go:495).
+	// EnableDecryptedEventBuffer stays off for now: it writes the plaintext of
+	// every incoming message into store.db, to be cleared once the handler
+	// returns (message.go:525-565, 463-477), so that a message decrypted but not
+	// yet handled when the process dies is not lost. No message is stored yet,
+	// so there is nothing to protect and the text would only pass through the
+	// file and its WAL. The message archive will need it.
+	//
+	// For the same reason no history blob is downloaded and no hist_sync receipt
+	// is sent (message.go:892-906); the notification itself is still acked like
+	// any message (message.go:495).
 	cli.ManualHistorySyncDownload = true
 	cli.DisableManualHistorySyncReceipt = true
 	// Called on autoReconnect's goroutine after a failed attempt
@@ -268,8 +306,8 @@ func (m *Manager) newClient(a *account, dev *store.Device) *whatsmeow.Client {
 // handler returns the event handler of the account's client cli. It
 // returns true for every event: false stops the dispatch to the handlers
 // after it, such as a pairing's QR channel (client.go:989-993), and makes
-// whatsmeow withhold the ack (message.go:459-462), which M1, storing no
-// messages, has no use for. It is never removed: RemoveEventHandler would
+// whatsmeow withhold the ack (message.go:459-462), which this version, storing
+// no messages, has no use for. It is never removed: RemoveEventHandler would
 // deadlock from inside a handler (client.go:812-820), and the events of a
 // client the account no longer follows are dropped in handle.
 func (m *Manager) handler(a *account, cli *whatsmeow.Client) func(any) bool {
@@ -288,7 +326,7 @@ func (m *Manager) handle(a *account, cli *whatsmeow.Client, evt any) {
 	}
 	if e, ok := evt.(*events.Message); ok {
 		if n := e.Message.GetProtocolMessage().GetHistorySyncNotification(); n != nil {
-			m.log.Debug("history sync ignored until M2", "account", a.nick, "type", n.GetSyncType().String(), "chunk", n.GetChunkOrder())
+			m.log.Debug("history sync ignored: history is not stored yet", "account", a.nick, "type", n.GetSyncType().String(), "chunk", n.GetChunkOrder())
 		}
 		return
 	}
@@ -315,12 +353,18 @@ func (m *Manager) handle(a *account, cli *whatsmeow.Client, evt any) {
 }
 
 // connect connects cli in the background once the client globals are
-// final; the account stays reconnecting until Connected (plan 6.6). With
+// final; the account stays reconnecting until Connected. With
 // InitialAutoReconnect whatsmeow retries a network error itself and returns
 // nil, but not a handshake timeout or an HTTP answer such as a captive
 // portal's (client.go:504-534), which its reconnect loop does retry later
 // on (client.go:645-656); so they are retried here, with the same backoff.
-// Once Close has begun it does nothing.
+// Once Close has begun it does nothing. While the account's devices are being
+// unlinked no attempt starts either: whatsmeow's Delete writes the ID and Deleted
+// of the device, which Connect reads under a lock Delete does not take, so an
+// attempt beside it is a data race. The attempt that has passed the check is the
+// one left, and the unlinking's second Disconnect closes it (unlinkClient). The
+// loop that stops here is not missed: an unlinking that leaves the device
+// connects its client again (runUnlink), and one that takes it needs no connect.
 func (m *Manager) connect(a *account, cli *whatsmeow.Client) {
 	m.mu.Lock()
 	ok := m.track()
@@ -334,6 +378,12 @@ func (m *Manager) connect(a *account, cli *whatsmeow.Client) {
 			return // closing
 		}
 		for n := 1; ; n = min(n+1, maxReconnectErrors) {
+			m.mu.Lock()
+			unlinking := a.unlinking != nil
+			m.mu.Unlock()
+			if unlinking {
+				return
+			}
 			err := m.net.connect(cli)
 			if err == nil || m.ctx.Err() != nil || errors.Is(err, whatsmeow.ErrAlreadyConnected) {
 				return
@@ -370,7 +420,14 @@ func (m *Manager) track() bool {
 	return true
 }
 
-// Accounts lists the accounts by nick with their status and archive size.
+// loginPendingReason is what an account says that waits for the link that add has
+// handed out: the pairing starts only when the link's page is opened (see Login),
+// so until then the account is needs_link to the Manager, but not to the agent,
+// which would link it again and end the link that is waiting.
+const loginPendingReason = "a login link was issued and not opened yet"
+
+// Accounts lists the accounts by nick with their status and archive size. An
+// account with a login link that works and has not been opened is shown linking.
 func (m *Manager) Accounts(ctx context.Context) []AccountInfo {
 	sizes, err := m.db.Accounts(ctx)
 	if err != nil {
@@ -384,6 +441,10 @@ func (m *Manager) Accounts(ctx context.Context) []AccountInfo {
 	out := make([]AccountInfo, 0, len(m.accounts))
 	for _, a := range m.accounts {
 		info := a.info
+		if info.Status == StatusNeedsLink && m.nonces.pending(a.nick) {
+			info = with(info, StatusLinking, loginPendingReason, time.Time{})
+			info.LoginPending = true
+		}
 		info.Chats, info.Messages = size[a.nick].Chats, size[a.nick].Messages
 		out = append(out, info)
 	}
@@ -394,7 +455,7 @@ func (m *Manager) Accounts(ctx context.Context) []AccountInfo {
 
 // Close disconnects every client and closes store.db; later calls return
 // the first result. The daemon calls it after the HTTP server has stopped
-// and before archive.db closes (plan 4.4). A client still busy after
+// and before archive.db closes. A client still busy after
 // closeWait is left behind: the process is exiting.
 func (m *Manager) Close() error {
 	m.closeOnce.Do(func() {

@@ -52,12 +52,12 @@ func (m *Manager) qrTicket(ctx context.Context, nick string, s *pairSession) (Li
 	}
 	png, err := qr.PNG(st.Code)
 	if err != nil {
-		m.log.Warn("draw the QR code", "account", nick, "err", err) // not the code (plan 10)
+		m.log.Warn("draw the QR code", "account", nick, "err", err) // not the code
 		return LinkTicket{}, m.abort(ctx, s, drawFailed)
 	}
 	if s.over() { // it ended while the code was drawn: an image for nothing
 		return LinkTicket{}, m.abort(ctx, s, "")
 	}
-	m.log.Info("QR code issued", "account", nick) // never the code (plan 10)
+	m.log.Info("QR code issued", "account", nick) // never the code: whoever has it can link an account
 	return LinkTicket{QRPNG: png, ExpiresAt: st.Expires}, nil
 }

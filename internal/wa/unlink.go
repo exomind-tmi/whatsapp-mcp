@@ -29,10 +29,14 @@ func deviceGone(cli *whatsmeow.Client) bool { return cli.Store.Deleted || cli.St
 // the client is disconnected, which this treats like the first failure, so the
 // hint that follows may be one too many. A device Logout cannot unlink goes by
 // Disconnect and Store.Delete, which also stops its use (store/store.go:286-298),
-// and the phone may still list it: listed. A connect that came up in between, from
-// the retries of m.connect, which Disconnect does not stop, is closed by the second
-// Disconnect: from the Delete on, every connect fails. On an error the keys are
-// still in store.db, and the client is disconnected.
+// and the phone may still list it: listed. The retries of m.connect, which
+// Disconnect does not stop, start no attempt while the account is unlinking; one
+// that came up before, or in the tiny gap between the check and Connect, is
+// closed by the second Disconnect: from the Delete on, every connect fails. In that
+// gap the Delete does write beside a Connect without a lock, for whatsmeow's Connect
+// reads Deleted under the socket lock and its Delete writes it without; only the
+// tests' fake network orders the two, with a lock of its own. On an error the keys
+// are still in store.db, and the client is disconnected.
 //
 // It may hang on the socket lock that a connect in its handshake holds (see
 // awaitEnd), so a call that must answer runs it on a goroutine of its own.
@@ -52,7 +56,7 @@ func (m *Manager) unlinkClient(nick string, cli *whatsmeow.Client) (listed bool,
 		return false, nil // on LoggedOut: the phone dropped it first
 	}
 	m.log.Warn("unlink the device", "account", nick, "err", lerr)
-	if err := cli.Store.Delete(m.ctx); err != nil {
+	if err := m.net.deleteDevice(cli, m.ctx); err != nil {
 		// whatsmeow's own Delete of a device the server has removed (a stream error,
 		// connectionevents.go:40-47) may be running beside ours, and ours then fails
 		// on the ID it has just dropped: the device is gone, and so is the question.
