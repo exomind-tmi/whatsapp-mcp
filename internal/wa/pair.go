@@ -63,16 +63,19 @@ func windowFor(first time.Duration) time.Duration {
 	return first
 }
 
-// pairKind is how a pairing is meant to end, which add must know: a pairing
-// that waits for a code typed on the phone is not for a login page to
-// restart. kindNone is not a kind of session, it is admit's request to decide
-// and start nothing, so no session has it.
+// pairKind is how a pairing is meant to end, which add must know: only a
+// pairing that a login page started is for a login page to restart; one that
+// waits for a code typed on the phone, or that has shown its QR code in the
+// chat, was started by an add that ended the link of the page. kindNone is not
+// a kind of session, it is admit's request to decide and start nothing, so no
+// session has it.
 type pairKind int
 
 const (
 	kindNone  pairKind = iota // admit only: decide, start no pairing
 	kindPage                  // a QR page shows the codes; the page's first poll starts it
 	kindPhone                 // the user types a pairing code on the phone; add with phone starts it
+	kindChat                  // the first QR code is an image in the chat; add with qr_image starts it
 )
 
 type pairState string
@@ -95,10 +98,10 @@ type pairStatus struct {
 }
 
 // pairSession links a new device to an account by QR code (plan 6.3), shown
-// on a login page or, with kindPhone, replaced by a pairing code that the
-// session's client asks for once the first QR code is out (plan 5.3). It
-// runs on the Manager's ctx, not the request's: a page reload or the next
-// add finds it alive.
+// on a login page or, with kindChat, as an image in the chat, or, with
+// kindPhone, replaced by a pairing code that the session's client asks for once
+// the first QR code is out (plan 5.3). It runs on the Manager's ctx, not the
+// request's: a page reload or the next add finds it alive.
 type pairSession struct {
 	kind   pairKind
 	cli    *whatsmeow.Client
@@ -114,8 +117,8 @@ type pairSession struct {
 	leave func()
 
 	// connecting is closed by readQR once the client globals are final, just
-	// before the connect: what add with a phone number times from is the
-	// connection, not our own start.
+	// before the connect: what add with a phone number or qr_image times from is
+	// the connection, not our own start.
 	connecting chan struct{}
 
 	// coded is closed by markCoded when the first QR code is out: the
@@ -384,8 +387,11 @@ func (m *Manager) readQR(a *account, s *pairSession) pairEnd {
 		return fail("could not connect to WhatsApp; check the network and call add again")
 	}
 	noCode, expired := "could not get a QR code from WhatsApp; check the network and call add again", "QR expired, call add again"
-	if s.kind == kindPhone { // nobody sees a QR code on this path
+	switch s.kind {
+	case kindPhone: // nobody sees a QR code on this path
 		noCode, expired = couldNotReach, codeExpired
+	case kindChat: // the call reports a missing first code as the phone path does, so that its error and the account's reason agree
+		noCode = couldNotReach
 	}
 	silence := time.NewTimer(m.qrSilence)
 	defer silence.Stop()

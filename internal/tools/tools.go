@@ -34,7 +34,7 @@ If a tool reports that the plugin was updated, ask the user to restart the sessi
 // real manager; the shim passes HandledByDaemon because it forwards every call.
 type WA interface {
 	Accounts(ctx context.Context) []wa.AccountInfo
-	Link(ctx context.Context, nick, phone string) (wa.LinkTicket, error)
+	Link(ctx context.Context, req wa.LinkRequest) (wa.LinkTicket, error)
 	Remove(ctx context.Context, nick string) (wa.RemoveResult, error)
 }
 
@@ -52,7 +52,7 @@ var _ WA = HandledByDaemon{} // a method added to WA breaks the build right here
 var errHandledByDaemon = errors.New("internal error: tool calls are handled by the daemon")
 
 func (HandledByDaemon) Accounts(context.Context) []wa.AccountInfo { return nil }
-func (HandledByDaemon) Link(context.Context, string, string) (wa.LinkTicket, error) {
+func (HandledByDaemon) Link(context.Context, wa.LinkRequest) (wa.LinkTicket, error) {
 	return wa.LinkTicket{}, errHandledByDaemon
 }
 func (HandledByDaemon) Remove(context.Context, string) (wa.RemoveResult, error) {

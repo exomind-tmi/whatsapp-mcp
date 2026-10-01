@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -15,7 +16,8 @@ const manageAccountsDescription = "Manage linked WhatsApp accounts.\n" +
 	"- `list` — accounts with status (`connected`, `reconnecting`, `needs_link`, `replaced`, `client_outdated`, `error`) and archive size.\n" +
 	"- `add` — link a NEW account, or RE-LINK an existing one: call `add` with the SAME `account_id`. Re-linking keeps the whole message archive. " +
 	"Use it when status is `needs_link` or the device was removed on the phone (new link: without `phone` a local QR page, with `phone` an 8-character pairing code), " +
-	"or when status is `replaced`/`error` (reconnects with the existing keys, no QR).\n" +
+	"or when status is `replaced`/`error` (reconnects with the existing keys, no QR). " +
+	"To link: in Claude Code (terminal, SSH, headless) use `phone`; in Cowork or Claude Desktop (has a browser) omit `phone`: the user opens the link or scans the QR shown in the chat (the response says how).\n" +
 	"- `remove` — FORGET the account: unlinks the device AND PERMANENTLY DELETES this account's message archive from this computer. " +
 	"Downloaded files are kept. To reconnect a broken account, do NOT use remove; use `add` with the same `account_id`."
 
@@ -29,6 +31,7 @@ type manageIn struct {
 	Action    string `json:"action" jsonschema:"list, add or remove"`
 	AccountID string `json:"account_id,omitempty" jsonschema:"account nickname: lowercase latin letters, digits, _ and -, up to 64; required for add and remove"`
 	Phone     string `json:"phone,omitempty" jsonschema:"add only: phone number of the account in international format; returns a pairing code instead of a QR page"`
+	QRImage   bool   `json:"qr_image,omitempty" jsonschema:"add only, without phone: returns the QR code as an image in the chat instead of a link. Call it only after the user has confirmed that the phone is ready (WhatsApp → Settings → Linked devices → Link a device): the QR lives about a minute; if expires_at has passed and the account is not connected yet, call add again with qr_image=true"`
 }
 
 // AccountOut is one account in the manage-accounts output. Exported, like
@@ -65,9 +68,15 @@ func (d Deps) manageAccounts(ctx context.Context, _ *mcp.CallToolRequest, in man
 	}
 	switch in.Action {
 	case "add":
-		t, err := d.WA.Link(ctx, in.AccountID, in.Phone)
+		if in.QRImage && in.Phone != "" { // before anything starts
+			return nil, ManageOut{}, wa.ErrQRImageWithPhone
+		}
+		t, err := d.WA.Link(ctx, wa.LinkRequest{Nick: in.AccountID, Phone: in.Phone, QRImage: in.QRImage})
 		if err != nil {
 			return nil, ManageOut{}, err
+		}
+		if len(t.QRPNG) > 0 {
+			return withQRImage(linkOut(t), t.QRPNG)
 		}
 		return nil, linkOut(t), nil
 	case "remove":
@@ -89,14 +98,45 @@ const pairCodeNextStep = "WhatsApp on the phone → Linked devices → Link a de
 	"enter the code before expires_at; then check manage-accounts action=list: " +
 	"`linking` while it waits, `connected` once linked, `needs_link` with a reason if it failed"
 
-// linkOut renders the three outcomes of add: a QR page to open, a pairing
-// code to type on the phone, or a reconnect with the keys the account has.
+// qrImageNextStep tells what to do with the QR code in the image of add with
+// qr_image. Nothing shows the user the outcome, so the agent is sent to list for
+// it, as for a pairing code. list shows linking all through the pairing, which
+// goes on after the image has expired (the next codes rotate unseen), so the
+// agent is told how to tell a dead image: expires_at has passed. A plain add
+// would answer with a link and cancel this pairing, hence the qr_image in the
+// call that repeats it. A host that does not draw the image shows the user
+// nothing, and the agent only has the user's word for it.
+const qrImageNextStep = "scan the QR code in the image with WhatsApp → Settings → Linked devices → Link a device within about a minute (before expires_at); " +
+	"then check manage-accounts action=list: `linking` while it waits, `connected` once linked, `needs_link` with a reason if it failed; " +
+	"if expires_at has passed and the account is still `linking`, the QR is dead: call add again with qr_image=true; " +
+	"if the user cannot see the image, call add without qr_image for a link"
+
+// linkNextStep is the answer to add without phone, which hands out a link, and
+// the other ways to link. The agent chooses by where it runs, so what is for
+// Claude Code, which has no use for the link, comes first, then the link and
+// the QR in the chat. The QR in the chat is a handshake of two calls: the first
+// one only tells the user to get the phone ready, because the QR lives about a
+// minute from the second.
+const linkNextStep = "In Claude Code (terminal, SSH, headless) there is no browser: call add again with phone, for a pairing code. " +
+	"Otherwise open the link and scan the QR code in WhatsApp → Settings → Linked devices → Link a device. " +
+	"To scan here in the chat instead: ask the user to get the phone ready on that screen, " +
+	"wait until they say they are ready, then call add again with qr_image=true"
+
+// linkOut renders the outcomes of add: a QR page to open, a QR code as an image
+// (which withQRImage then adds to the result), a pairing code to type on the
+// phone, or a reconnect with the keys the account has.
 func linkOut(t wa.LinkTicket) ManageOut {
 	switch {
 	case t.Reconnecting:
 		return ManageOut{
 			Status:   string(wa.StatusReconnecting),
 			NextStep: "reconnecting with the existing keys, no QR: check manage-accounts action=list in a few seconds",
+		}
+	case len(t.QRPNG) > 0:
+		return ManageOut{
+			Status:    string(wa.StatusLinking),
+			ExpiresAt: isoTime(t.ExpiresAt),
+			NextStep:  qrImageNextStep,
 		}
 	case t.PairCode != "":
 		return ManageOut{
@@ -110,8 +150,26 @@ func linkOut(t wa.LinkTicket) ManageOut {
 		Status:    string(wa.StatusLinking),
 		LoginURL:  t.LoginURL,
 		ExpiresAt: isoTime(t.ExpiresAt),
-		NextStep:  "open the link and scan the QR code in WhatsApp → Linked devices",
+		NextStep:  linkNextStep,
 	}
+}
+
+// withQRImage is the result of add with qr_image: the usual output, with the QR
+// code as an image next to its JSON text. The SDK makes the text, and the
+// structured content with it, only for a result that has no content of its own
+// (mcp/server.go: "if res.Content == nil"), so with the image in Content the
+// text must be put there too, or a client that reads only the content would not
+// see the next step. The output schema, which the SDK takes from ManageOut and
+// not from the result, does not change.
+func withQRImage(out ManageOut, png []byte) (*mcp.CallToolResult, ManageOut, error) {
+	text, err := json.Marshal(out)
+	if err != nil {
+		return nil, ManageOut{}, err
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{
+		&mcp.TextContent{Text: string(text)},
+		&mcp.ImageContent{Data: png, MIMEType: "image/png"},
+	}}, out, nil
 }
 
 // repairStep is the next_step an account's status calls for, or "" when

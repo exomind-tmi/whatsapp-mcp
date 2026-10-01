@@ -25,9 +25,10 @@ type WA struct {
 
 // Call is one recorded call with the arguments the tool passed on.
 type Call struct {
-	Method string
-	Nick   string // Link, Remove
-	Phone  string // Link
+	Method  string
+	Nick    string // Link, Remove
+	Phone   string // Link
+	QRImage bool   // Link
 }
 
 func (f *WA) Accounts(context.Context) []wa.AccountInfo {
@@ -35,8 +36,8 @@ func (f *WA) Accounts(context.Context) []wa.AccountInfo {
 	return f.Accs
 }
 
-func (f *WA) Link(_ context.Context, nick, phone string) (wa.LinkTicket, error) {
-	f.record(Call{Method: "Link", Nick: nick, Phone: phone})
+func (f *WA) Link(_ context.Context, req wa.LinkRequest) (wa.LinkTicket, error) {
+	f.record(Call{Method: "Link", Nick: req.Nick, Phone: req.Phone, QRImage: req.QRImage})
 	return f.Ticket, f.Err
 }
 

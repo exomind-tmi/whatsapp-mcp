@@ -1,6 +1,6 @@
 [
   {
-    "description": "Manage linked WhatsApp accounts.\n- `list` — accounts with status (`connected`, `reconnecting`, `needs_link`, `replaced`, `client_outdated`, `error`) and archive size.\n- `add` — link a NEW account, or RE-LINK an existing one: call `add` with the SAME `account_id`. Re-linking keeps the whole message archive. Use it when status is `needs_link` or the device was removed on the phone (new link: without `phone` a local QR page, with `phone` an 8-character pairing code), or when status is `replaced`/`error` (reconnects with the existing keys, no QR).\n- `remove` — FORGET the account: unlinks the device AND PERMANENTLY DELETES this account's message archive from this computer. Downloaded files are kept. To reconnect a broken account, do NOT use remove; use `add` with the same `account_id`.",
+    "description": "Manage linked WhatsApp accounts.\n- `list` — accounts with status (`connected`, `reconnecting`, `needs_link`, `replaced`, `client_outdated`, `error`) and archive size.\n- `add` — link a NEW account, or RE-LINK an existing one: call `add` with the SAME `account_id`. Re-linking keeps the whole message archive. Use it when status is `needs_link` or the device was removed on the phone (new link: without `phone` a local QR page, with `phone` an 8-character pairing code), or when status is `replaced`/`error` (reconnects with the existing keys, no QR). To link: in Claude Code (terminal, SSH, headless) use `phone`; in Cowork or Claude Desktop (has a browser) omit `phone`: the user opens the link or scans the QR shown in the chat (the response says how).\n- `remove` — FORGET the account: unlinks the device AND PERMANENTLY DELETES this account's message archive from this computer. Downloaded files are kept. To reconnect a broken account, do NOT use remove; use `add` with the same `account_id`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -20,6 +20,10 @@
         "phone": {
           "description": "add only: phone number of the account in international format; returns a pairing code instead of a QR page",
           "type": "string"
+        },
+        "qr_image": {
+          "description": "add only, without phone: returns the QR code as an image in the chat instead of a link. Call it only after the user has confirmed that the phone is ready (WhatsApp → Settings → Linked devices → Link a device): the QR lives about a minute; if expires_at has passed and the account is not connected yet, call add again with qr_image=true",
+          "type": "boolean"
         }
       },
       "required": [

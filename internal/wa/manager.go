@@ -73,7 +73,7 @@ type Manager struct {
 	closeWait  time.Duration
 	pairedWait time.Duration
 	qrSilence  time.Duration
-	codeWait   time.Duration // add with a phone number: the first QR code, from the connect
+	codeWait   time.Duration // add with a phone number or qr_image: the first QR code, from the connect
 	phoneWait  time.Duration // and then WhatsApp's answer to PairPhone
 	abortWait  time.Duration // and the wait for a pairing it gave up on to end
 

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"image/png"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,9 +22,11 @@ import (
 	"github.com/exomind-tmi/whatsapp-mcp/internal/client"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/daemon"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
+	"github.com/exomind-tmi/whatsapp-mcp/internal/qr"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/testutil"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/tools"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/tools/toolstest"
+	"github.com/exomind-tmi/whatsapp-mcp/internal/wa"
 )
 
 // startDaemon runs the real daemon in-process on a temp home.
@@ -148,10 +152,10 @@ func TestShimReportsOutdatedToolList(t *testing.T) {
 	}
 }
 
-// fakeDaemon answers /healthz like the daemon and serves the real tools on
-// /mcp, but breaks the connection on the first `breaks` tools/call requests.
-// It returns the number of tools/call requests that reached it.
-func fakeDaemon(t *testing.T, version string, breaks int32) (home.Home, *atomic.Int32) {
+// fakeDaemon answers /healthz like the daemon and serves the real tools, over
+// w, on /mcp, but breaks the connection on the first `breaks` tools/call
+// requests. It returns the number of tools/call requests that reached it.
+func fakeDaemon(t *testing.T, version string, breaks int32, w tools.WA) (home.Home, *atomic.Int32) {
 	t.Helper()
 	h := home.Home{Dir: testutil.TempDir(t)}
 	if err := h.Ensure(); err != nil {
@@ -160,7 +164,7 @@ func fakeDaemon(t *testing.T, version string, breaks int32) (home.Home, *atomic.
 	const token = "test-token"
 	os.WriteFile(h.TokenFile(), []byte(token), 0o600)
 
-	server := tools.NewServer(version, tools.Deps{WA: &toolstest.WA{}})
+	server := tools.NewServer(version, tools.Deps{WA: w})
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	var calls atomic.Int32
@@ -200,7 +204,7 @@ func TestTransportErrorRetry(t *testing.T) {
 		{"read tool is repeated only once", true, 2, 2, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, calls := fakeDaemon(t, "v0.1.0", tc.breaks)
+			h, calls := fakeDaemon(t, "v0.1.0", tc.breaks, &toolstest.WA{})
 			f := newForwarder(h, "v0.1.0", slog.New(slog.DiscardHandler))
 			defer f.close()
 			f.readOnly = func(string) bool { return tc.readOnly }
@@ -217,6 +221,71 @@ func TestTransportErrorRetry(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestShimForwardsTheQRImage: the result of add with qr_image, the usual output
+// as text and as structured content and the QR as an image beside them, reaches
+// the client as the daemon made it, the image byte for byte; and the argument
+// reaches the daemon.
+func TestShimForwardsTheQRImage(t *testing.T) {
+	data, err := qr.PNG("2@aGVsbG8sIHdvcmxk,c2VjcmV0,a2V5,YWR2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemonWA := &toolstest.WA{Ticket: wa.LinkTicket{QRPNG: data, ExpiresAt: time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)}}
+	h, _ := fakeDaemon(t, "v0.1.0", 0, daemonWA)
+	cs := shimSession(t, h, "v0.1.0")
+
+	// What the daemon itself answers with, for the shim's answer to be compared to:
+	// over a WA of its own, so that daemonWA records only what the shim sent.
+	direct := daemonSession(t, &toolstest.WA{Ticket: daemonWA.Ticket})
+	args := map[string]any{"action": "add", "account_id": "personal", "qr_image": true}
+	want, err := direct.CallTool(context.Background(), &mcp.CallToolParams{Name: "manage-accounts", Arguments: args})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, text := callText(t, cs, "manage-accounts", args)
+
+	if got.IsError || len(got.Content) != 2 {
+		t.Fatalf("isError=%v, %d content blocks, want the text and the image: %s", got.IsError, len(got.Content), text)
+	}
+	if tc, ok := got.Content[0].(*mcp.TextContent); !ok || !strings.Contains(tc.Text, `"status":"linking"`) || !strings.Contains(tc.Text, "scan the QR code in the image") {
+		t.Errorf("content[0] = %#v, want the JSON text", got.Content[0])
+	}
+	img, ok := got.Content[1].(*mcp.ImageContent)
+	if !ok || img.MIMEType != "image/png" || !bytes.Equal(img.Data, data) {
+		t.Fatalf("content[1] = %#v, want the PNG of the QR code, byte for byte", got.Content[1])
+	}
+	if _, err := png.Decode(bytes.NewReader(img.Data)); err != nil {
+		t.Errorf("the image is not a PNG: %v", err)
+	}
+	if got.StructuredContent == nil {
+		t.Error("structuredContent lost in forwarding")
+	}
+	gotJSON, _ := json.Marshal(got)
+	wantJSON, _ := json.Marshal(want)
+	if !bytes.Equal(gotJSON, wantJSON) {
+		t.Errorf("the shim changed the result:\n%s\nwant\n%s", gotJSON, wantJSON)
+	}
+	if calls, want := daemonWA.Calls(), []toolstest.Call{{Method: "Link", Nick: "personal", QRImage: true}}; !slices.Equal(calls, want) {
+		t.Errorf("the daemon's WA calls = %+v, want %+v: qr_image did not reach it", calls, want)
+	}
+}
+
+// daemonSession is a client of the tools served over w with no shim between.
+func daemonSession(t *testing.T, w tools.WA) *mcp.ClientSession {
+	t.Helper()
+	st, ct := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := tools.NewServer("v0.1.0", tools.Deps{WA: w}).Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cs.Close() })
+	return cs
 }
 
 func TestShimUsesNewerDaemonAsIs(t *testing.T) {

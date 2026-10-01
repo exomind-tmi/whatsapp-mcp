@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"image/png"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/exomind-tmi/whatsapp-mcp/internal/qr"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/tools/toolstest"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/wa"
 )
@@ -74,6 +76,8 @@ func TestManageAccountsSchema(t *testing.T) {
 		"call `add` with the SAME `account_id`. Re-linking keeps the whole message archive.",
 		"when status is `needs_link` or the device was removed on the phone (new link: without `phone` a local QR page, with `phone` an 8-character pairing code)",
 		"or when status is `replaced`/`error` (reconnects with the existing keys, no QR).",
+		// Where the agent runs decides how to link (Anton, 2026-10-01).
+		"To link: in Claude Code (terminal, SSH, headless) use `phone`; in Cowork or Claude Desktop (has a browser) omit `phone`: the user opens the link or scans the QR shown in the chat (the response says how).",
 		"FORGET the account: unlinks the device AND PERMANENTLY DELETES this account's message archive from this computer. Downloaded files are kept.",
 		"To reconnect a broken account, do NOT use remove; use `add` with the same `account_id`.",
 	} {
@@ -85,12 +89,26 @@ func TestManageAccountsSchema(t *testing.T) {
 	var schema struct {
 		Required   []string `json:"required"`
 		Properties map[string]struct {
-			Enum []string `json:"enum"`
+			Type        string   `json:"type"`
+			Description string   `json:"description"`
+			Enum        []string `json:"enum"`
 		} `json:"properties"`
 	}
 	json.Unmarshal(b, &schema)
 	if got := strings.Join(schema.Properties["action"].Enum, ","); got != "list,add,remove" {
 		t.Errorf("action enum = %q", got)
+	}
+	// The QR in the chat is a handshake of two calls, and the parameter says when
+	// the second is made: it starts the QR's minute.
+	qrImage := schema.Properties["qr_image"]
+	if qrImage.Type != "boolean" {
+		t.Errorf("qr_image has the type %q, want boolean", qrImage.Type)
+	}
+	for _, want := range []string{"add only, without phone", "only after the user has confirmed that the phone is ready", "lives about a minute",
+		"if expires_at has passed and the account is not connected yet, call add again with qr_image=true"} {
+		if !strings.Contains(qrImage.Description, want) {
+			t.Errorf("qr_image's description lacks %q: %s", want, qrImage.Description)
+		}
 	}
 	if strings.Join(schema.Required, ",") != "action" {
 		t.Errorf("required = %v", schema.Required)
@@ -236,10 +254,18 @@ func TestManageAccountsAddRemoveOutput(t *testing.T) {
 			map[string]any{"action": "add", "account_id": "personal"},
 			toolstest.Call{Method: "Link", Nick: "personal"},
 			`{"login_url":"http://127.0.0.1:1/login/x?t=n","expires_at":"` + expires.Local().Format(time.RFC3339) +
-				`","next_step":"open the link and scan the QR code in WhatsApp → Linked devices","status":"linking"}`},
+				`","next_step":"In Claude Code (terminal, SSH, headless) there is no browser: call add again with phone, for a pairing code. ` +
+				"Otherwise open the link and scan the QR code in WhatsApp → Settings → Linked devices → Link a device. " +
+				"To scan here in the chat instead: ask the user to get the phone ready on that screen, " +
+				"wait until they say they are ready, then call add again with qr_image=true" +
+				`","status":"linking"}`},
 		{"add reconnect", &toolstest.WA{Ticket: wa.LinkTicket{Reconnecting: true}},
 			map[string]any{"action": "add", "account_id": "personal"},
 			toolstest.Call{Method: "Link", Nick: "personal"},
+			`{"next_step":"reconnecting with the existing keys, no QR: check manage-accounts action=list in a few seconds","status":"reconnecting"}`},
+		{"add reconnect, qr_image ignored", &toolstest.WA{Ticket: wa.LinkTicket{Reconnecting: true}},
+			map[string]any{"action": "add", "account_id": "personal", "qr_image": true},
+			toolstest.Call{Method: "Link", Nick: "personal", QRImage: true},
 			`{"next_step":"reconnecting with the existing keys, no QR: check manage-accounts action=list in a few seconds","status":"reconnecting"}`},
 		{"add code", &toolstest.WA{Ticket: wa.LinkTicket{PairCode: "ABCD-EFGH", ExpiresAt: expires}},
 			map[string]any{"action": "add", "account_id": "personal", "phone": "+70000000000"},
@@ -257,6 +283,9 @@ func TestManageAccountsAddRemoveOutput(t *testing.T) {
 			res, text := call(t, connect(t, tc.fake), tc.args)
 			if res.IsError || !sameJSON(t, text, tc.want) {
 				t.Fatalf("isError=%v %s\nwant %s", res.IsError, text, tc.want)
+			}
+			if len(res.Content) != 1 { // an image comes only with the QR in the chat
+				t.Errorf("content has %d blocks, want the JSON text alone", len(res.Content))
 			}
 			if got := tc.fake.Calls(); !slices.Equal(got, []toolstest.Call{tc.call}) {
 				t.Fatalf("WA calls = %+v, want %+v", got, tc.call)
@@ -284,6 +313,71 @@ func TestManageAccountsAddRemoveReportErrors(t *testing.T) {
 	want := []toolstest.Call{{Method: "Link", Nick: "personal"}, {Method: "Remove", Nick: "personal"}}
 	if got := fake.Calls(); !slices.Equal(got, want) {
 		t.Fatalf("WA calls = %+v, want %+v", got, want)
+	}
+}
+
+// qrPNG is a real QR image: the one the daemon draws for a code.
+func qrPNG(t *testing.T) []byte {
+	t.Helper()
+	data, err := qr.PNG("2@aGVsbG8sIHdvcmxk,c2VjcmV0,a2V5,YWR2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// TestManageAccountsAddQRImage: add with qr_image answers with the usual output,
+// as structured content and as the JSON text a client that reads only the
+// content sees, and with the QR code as an image next to it. The SDK would make
+// the text itself only for a result with no content of its own.
+func TestManageAccountsAddQRImage(t *testing.T) {
+	data := qrPNG(t)
+	fake := &toolstest.WA{Ticket: wa.LinkTicket{QRPNG: data, ExpiresAt: expires}}
+	res, text := call(t, connect(t, fake), map[string]any{"action": "add", "account_id": "personal", "qr_image": true})
+	if res.IsError {
+		t.Fatalf("error: %s", text)
+	}
+	want := `{"status":"linking","expires_at":"` + expires.Local().Format(time.RFC3339) + `","next_step":"` +
+		"scan the QR code in the image with WhatsApp → Settings → Linked devices → Link a device within about a minute (before expires_at); " +
+		"then check manage-accounts action=list: `linking` while it waits, `connected` once linked, `needs_link` with a reason if it failed; " +
+		"if expires_at has passed and the account is still `linking`, the QR is dead: call add again with qr_image=true; " +
+		"if the user cannot see the image, call add without qr_image for a link" + `"}`
+
+	if len(res.Content) != 2 {
+		t.Fatalf("content has %d blocks, want the JSON text and the image", len(res.Content))
+	}
+	if tc, ok := res.Content[0].(*mcp.TextContent); !ok || !sameJSON(t, tc.Text, want) {
+		t.Errorf("content[0] = %#v, want the JSON text %s", res.Content[0], want)
+	}
+	img, ok := res.Content[1].(*mcp.ImageContent)
+	if !ok || img.MIMEType != "image/png" || !bytes.Equal(img.Data, data) {
+		t.Fatalf("content[1] = %#v, want the PNG of the QR code", res.Content[1])
+	}
+	if _, err := png.Decode(bytes.NewReader(img.Data)); err != nil {
+		t.Errorf("the image is not a PNG: %v", err)
+	}
+	structured, err := json.Marshal(res.StructuredContent)
+	if err != nil || !sameJSON(t, string(structured), want) {
+		t.Errorf("structuredContent = %s (%v), want %s", structured, err, want)
+	}
+	if text != ResultText(res) || !sameJSON(t, text, want) {
+		t.Errorf("the text of the result = %s", text)
+	}
+	if got, wantCall := fake.Calls(), []toolstest.Call{{Method: "Link", Nick: "personal", QRImage: true}}; !slices.Equal(got, wantCall) {
+		t.Errorf("WA calls = %+v, want %+v", got, wantCall)
+	}
+}
+
+// TestManageAccountsQRImageWithPhone: the two ways to link exclude each other,
+// and the call is refused before anything starts.
+func TestManageAccountsQRImageWithPhone(t *testing.T) {
+	fake := &toolstest.WA{Ticket: wa.LinkTicket{QRPNG: qrPNG(t), ExpiresAt: expires}}
+	res, text := call(t, connect(t, fake), map[string]any{"action": "add", "account_id": "personal", "phone": "+70000000000", "qr_image": true})
+	if !res.IsError || text != "qr_image and phone are mutually exclusive" || len(res.Content) != 1 {
+		t.Fatalf("isError=%v %q (%d blocks)", res.IsError, text, len(res.Content))
+	}
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Errorf("a refused add reached WA: %v", calls)
 	}
 }
 

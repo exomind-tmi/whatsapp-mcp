@@ -137,7 +137,7 @@ func TestLinkOutcomes(t *testing.T) {
 			m, fn, _ := linkFixture(t)
 			tc.prep(t, m)
 			before := fn.called(true)
-			tk, err := m.Link(context.Background(), "personal", "")
+			tk, err := m.Link(context.Background(), LinkRequest{Nick: "personal"})
 
 			switch tc.want {
 			case link:
@@ -160,7 +160,7 @@ func TestLinkOutcomes(t *testing.T) {
 					t.Errorf("%d connects, want the first and the reconnect: %v", n, fn.called(true))
 				}
 			case refuse:
-				if err == nil || !strings.Contains(err.Error(), tc.reason) || (tk != LinkTicket{}) {
+				if err == nil || !strings.Contains(err.Error(), tc.reason) || !noTicket(tk) {
 					t.Fatalf("Link = %+v, %v; want a refusal with %q", tk, err, tc.reason)
 				}
 			}
@@ -181,7 +181,7 @@ func TestLinkNewAccount(t *testing.T) {
 	fn := &fakeNet{}
 	m := f.start(t, fn.network(readyGlobals()))
 
-	tk, err := m.Link(context.Background(), "fresh", "")
+	tk, err := m.Link(context.Background(), LinkRequest{Nick: "fresh"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestLinkRefusesWhatItCannotDo(t *testing.T) {
 	ctx := context.Background()
 
 	for _, nick := range []string{"", "Bad Nick", "../x", strings.Repeat("a", 65)} {
-		if _, err := m.Link(ctx, nick, ""); err == nil {
+		if _, err := m.Link(ctx, LinkRequest{Nick: nick}); err == nil {
 			t.Errorf("Link(%q) accepted the nick", nick)
 		}
 	}
@@ -225,7 +225,7 @@ func TestLinkRefusesWhatItCannotDo(t *testing.T) {
 		t.Errorf("a refused Link left something behind: %v, %v", accs, fn.called(true))
 	}
 	m.Close()
-	if _, err := m.Link(ctx, "fresh", ""); !errors.Is(err, errClosing) {
+	if _, err := m.Link(ctx, LinkRequest{Nick: "fresh"}); !errors.Is(err, errClosing) {
 		t.Errorf("Link after Close: %v", err)
 	}
 }
@@ -240,7 +240,7 @@ func TestLinkNeverLogsTheLink(t *testing.T) {
 	m := f.start(t, fn.network(readyGlobals()))
 	ctx := context.Background()
 
-	tk, err := m.Link(ctx, "fresh", "")
+	tk, err := m.Link(ctx, LinkRequest{Nick: "fresh"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestLinkNeverLogsTheLink(t *testing.T) {
 	fn.qr(t, 0).ch <- code("2@secretcode", time.Minute)
 	eventually(t, "the code", func() bool { s, _ := m.pairing("fresh"); return s.Code != "" })
 	_, wrong := m.Login(ctx, "fresh", "wrong")
-	m.Link(ctx, "fresh", "") // restarts the pairing
+	m.Link(ctx, LinkRequest{Nick: "fresh"}) // restarts the pairing
 	m.Close()
 
 	if log := buf.String(); strings.Contains(log, nonce) || strings.Contains(log, "/login/") || strings.Contains(log, "secretcode") ||
@@ -272,7 +272,7 @@ func TestLinkWhilePairing(t *testing.T) {
 	m := f.start(t, fn.network(readyGlobals()))
 	ctx := context.Background()
 
-	tk1, _ := m.Link(ctx, "fresh", "")
+	tk1, _ := m.Link(ctx, LinkRequest{Nick: "fresh"})
 	n1 := nonceIn(t, tk1, "fresh")
 	if _, err := m.Login(ctx, "fresh", n1); err != nil {
 		t.Fatal(err)
@@ -282,7 +282,7 @@ func TestLinkWhilePairing(t *testing.T) {
 	s1 := sessOf(m, "fresh")
 	eventually(t, "the code", stateIs(s1, pairCode))
 
-	tk2, err := m.Link(ctx, "fresh", "")
+	tk2, err := m.Link(ctx, LinkRequest{Nick: "fresh"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestLinkWhilePairing(t *testing.T) {
 	if !q2.cli.PrePairCallback(types.NewADJID("70000000005", 0, 13), "android", "") {
 		t.Fatal("PrePairCallback refused")
 	}
-	if _, err := m.Link(ctx, "fresh", ""); err == nil || !strings.Contains(err.Error(), "just linked") {
+	if _, err := m.Link(ctx, LinkRequest{Nick: "fresh"}); err == nil || !strings.Contains(err.Error(), "just linked") {
 		t.Errorf("Link after the scan: %v", err)
 	}
 	if _, err := m.Login(ctx, "fresh", n2); err != nil {
@@ -328,7 +328,7 @@ func TestLogin(t *testing.T) {
 	fn := &fakeNet{}
 	m := f.start(t, fn.network(readyGlobals()))
 	ctx := context.Background()
-	tk, _ := m.Link(ctx, "fresh", "")
+	tk, _ := m.Link(ctx, LinkRequest{Nick: "fresh"})
 	nonce := nonceIn(t, tk, "fresh")
 
 	for _, bad := range []struct{ nick, nonce string }{{"fresh", ""}, {"fresh", "x"}, {"fresh", nonce + "x"}, {"personal", nonce}, {"nobody", nonce}} {
@@ -378,7 +378,7 @@ func TestLoginStartsOnce(t *testing.T) {
 	fn := &fakeNet{}
 	m := f.start(t, fn.network(readyGlobals()))
 	ctx := context.Background()
-	tk, _ := m.Link(ctx, "fresh", "")
+	tk, _ := m.Link(ctx, LinkRequest{Nick: "fresh"})
 	nonce := nonceIn(t, tk, "fresh")
 
 	var wg sync.WaitGroup
@@ -401,7 +401,7 @@ func TestLoginStartsOnce(t *testing.T) {
 // linkNonce adds nick and returns the nonce of its link.
 func linkNonce(t *testing.T, m *Manager, nick string) string {
 	t.Helper()
-	tk, err := m.Link(context.Background(), nick, "")
+	tk, err := m.Link(context.Background(), LinkRequest{Nick: nick})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +553,7 @@ func TestLinkReconnectEndsTheOldLink(t *testing.T) {
 	forceStatus(m, "personal", StatusNeedsLink)
 	old := linkNonce(t, m, "personal")
 	forceStatus(m, "personal", StatusReplaced)
-	if tk, err := m.Link(ctx, "personal", ""); err != nil || !tk.Reconnecting {
+	if tk, err := m.Link(ctx, LinkRequest{Nick: "personal"}); err != nil || !tk.Reconnecting {
 		t.Fatalf("Link = %+v, %v; want a reconnect", tk, err)
 	}
 	m.wg.Wait()
@@ -567,7 +567,7 @@ func TestLinkReconnectEndsTheOldLink(t *testing.T) {
 	forceStatus(m, "personal", StatusNeedsLink)
 	fresh := linkNonce(t, m, "personal")
 	forceStatus(m, "personal", StatusConnected)
-	if _, err := m.Link(ctx, "personal", ""); err == nil {
+	if _, err := m.Link(ctx, LinkRequest{Nick: "personal"}); err == nil {
 		t.Fatal("a connected account was linked again")
 	}
 	if !m.ValidLogin("personal", fresh) {
@@ -610,7 +610,7 @@ func TestLoginOutlivesTheWindowOnceStarted(t *testing.T) {
 	m := f.start(t, fn.network(readyGlobals()))
 	c := &clock{time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)}
 	m.nonces.now = c.now
-	tk, err := m.Link(ctx, "fresh", "")
+	tk, err := m.Link(ctx, LinkRequest{Nick: "fresh"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +637,7 @@ func TestLoginOutlivesTheWindowOnceStarted(t *testing.T) {
 	}
 
 	// A page never opened ends with the window, as before.
-	tk2, _ := m.Link(ctx, "other", "")
+	tk2, _ := m.Link(ctx, LinkRequest{Nick: "other"})
 	n2 := nonceIn(t, tk2, "other")
 	c.t = tk2.ExpiresAt
 	if m.ValidLogin("other", n2) {

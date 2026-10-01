@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -30,15 +31,23 @@ type linkResult struct {
 	err error
 }
 
+// noTicket tells that tk is the empty ticket, which a failed Link returns. It
+// holds a slice (the QR image), so it cannot be compared with ==.
+func noTicket(tk LinkTicket) bool { return reflect.DeepEqual(tk, LinkTicket{}) }
+
 // linkAsync is Link in a goroutine, for the calls that wait.
 func linkAsync(m *Manager, nick, phone string) <-chan linkResult {
 	return linkAsyncCtx(context.Background(), m, nick, phone)
 }
 
 func linkAsyncCtx(ctx context.Context, m *Manager, nick, phone string) <-chan linkResult {
+	return linkReqAsync(ctx, m, LinkRequest{Nick: nick, Phone: phone})
+}
+
+func linkReqAsync(ctx context.Context, m *Manager, req LinkRequest) <-chan linkResult {
 	res := make(chan linkResult, 1)
 	go func() {
-		tk, err := m.Link(ctx, nick, phone)
+		tk, err := m.Link(ctx, req)
 		res <- linkResult{tk, err}
 	}()
 	return res
@@ -137,7 +146,7 @@ func TestLinkPhone(t *testing.T) {
 	q := fn.qr(t, 0)
 	// The ticket is the code as whatsmeow returns it, and the end of the QR
 	// window, which started when the first code did.
-	if want := (LinkTicket{PairCode: pairCodeOK, ExpiresAt: s.window}); tk != want {
+	if want := (LinkTicket{PairCode: pairCodeOK, ExpiresAt: s.window}); !reflect.DeepEqual(tk, want) {
 		t.Errorf("ticket %+v, want %+v", tk, want)
 	}
 	if qrWindow != 160*time.Second || tk.ExpiresAt.Before(before.Add(qrWindow)) || tk.ExpiresAt.After(after.Add(qrWindow)) {
@@ -237,7 +246,7 @@ func TestLinkPhoneOutcomes(t *testing.T) {
 					t.Errorf("%d connects, want the first and the reconnect: %v", n, fn.called(true))
 				}
 			case wantRefuse:
-				if err == nil || !strings.Contains(err.Error(), tc.reason) || (tk != LinkTicket{}) {
+				if err == nil || !strings.Contains(err.Error(), tc.reason) || !noTicket(tk) {
 					t.Fatalf("Link = %+v, %v; want a refusal with %q", tk, err, tc.reason)
 				}
 			}
@@ -319,10 +328,10 @@ func TestLinkPhoneRefusals(t *testing.T) {
 				if exists {
 					jid = accountJID(t, f, tc.nick)
 				}
-				tk, err := m.Link(ctx, tc.nick, tc.phone)
+				tk, err := m.Link(ctx, LinkRequest{Nick: tc.nick, Phone: tc.phone})
 
 				var r refusal
-				if !errors.As(err, &r) || err.Error() != tc.refusal || (tk != LinkTicket{}) {
+				if !errors.As(err, &r) || err.Error() != tc.refusal || !noTicket(tk) {
 					t.Fatalf("Link = %+v, %v; want the refusal %q", tk, err, tc.refusal)
 				}
 				if got := fn.called(true); !slices.Equal(got, before) || len(phoneCalls(fn)) != 0 {
@@ -389,7 +398,7 @@ func TestLinkPhoneNoCode(t *testing.T) {
 			}
 			start := time.Now()
 			r := result(t, res)
-			if r.err == nil || r.err.Error() != tc.reason || (r.tk != LinkTicket{}) {
+			if r.err == nil || r.err.Error() != tc.reason || !noTicket(r.tk) {
 				t.Fatalf("Link = %+v, %v; want the error %q", r.tk, r.err, tc.reason)
 			}
 			if tc.slow && time.Since(start) < m.codeWait/2 {
@@ -456,7 +465,7 @@ func TestLinkPhoneBarrier(t *testing.T) {
 		res := linkAsyncCtx(ctx, m, "fresh", typedPhone)
 		s := awaitSession(t, m, "fresh") // the call is in its wait: the pairing is built with the ctx alive
 		cancel()
-		if r := result(t, res); !errors.Is(r.err, context.Canceled) || (r.tk != LinkTicket{}) {
+		if r := result(t, res); !errors.Is(r.err, context.Canceled) || !noTicket(r.tk) {
 			t.Fatalf("Link = %+v, %v; want its ctx's error", r.tk, r.err)
 		}
 		eventually(t, "the session's end with no connect", func() bool { return isDone(s) }) // the globals never come
@@ -477,7 +486,7 @@ func TestLinkPhoneBarrier(t *testing.T) {
 		res := linkAsyncCtx(ctx, m, "fresh", typedPhone)
 		eventually(t, "the connect", func() bool { return countCalls(fn, "connect pairing") == 1 })
 		cancel()
-		if r := result(t, res); !errors.Is(r.err, context.Canceled) || (r.tk != LinkTicket{}) {
+		if r := result(t, res); !errors.Is(r.err, context.Canceled) || !noTicket(r.tk) {
 			t.Fatalf("Link = %+v, %v; want its ctx's error", r.tk, r.err)
 		}
 		s := sessOf(m, "fresh")
@@ -524,7 +533,7 @@ func TestLinkPhoneFails(t *testing.T) {
 			m := f.start(t, fn.network(readyGlobals()))
 			m.phoneWait = 50 * time.Millisecond
 			r := link(t, m, "fresh", typedPhone)
-			if r.err == nil || r.err.Error() != tc.reason || (r.tk != LinkTicket{}) {
+			if r.err == nil || r.err.Error() != tc.reason || !noTicket(r.tk) {
 				t.Fatalf("Link = %+v, %v; want the error %q", r.tk, r.err, tc.reason)
 			}
 			if strings.Contains(r.err.Error(), typedDigits) || strings.Contains(r.err.Error(), "SERVER-WORDS") {
@@ -569,7 +578,7 @@ func TestLinkPhoneClose(t *testing.T) {
 			if err := m.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if r := result(t, res); !errors.Is(r.err, errClosing) || (r.tk != LinkTicket{}) {
+			if r := result(t, res); !errors.Is(r.err, errClosing) || !noTicket(r.tk) {
 				t.Errorf("Link = %+v, %v; want the closing error", r.tk, r.err)
 			}
 			s := sessOf(m, "fresh")
@@ -579,7 +588,7 @@ func TestLinkPhoneClose(t *testing.T) {
 			if got := fn.called(true); !slices.Equal(got, append(tc.calls, "disconnect pairing")) {
 				t.Errorf("calls %v: want the pairing client disconnected after Close and no PairPhone", got)
 			}
-			if _, err := m.Link(context.Background(), "other", typedPhone); !errors.Is(err, errClosing) {
+			if _, err := m.Link(context.Background(), LinkRequest{Nick: "other", Phone: typedPhone}); !errors.Is(err, errClosing) {
 				t.Errorf("Link after Close: %v", err)
 			}
 		})
@@ -615,7 +624,7 @@ func TestAwaitFirstCodeAfterEnd(t *testing.T) {
 			close(s.connecting)
 			s.markCoded()
 			tc.end(m, s)
-			if _, err := m.awaitFirstCode(context.Background(), "fresh", s); err == nil || err.Error() != tc.want.Error() {
+			if err := m.awaitFirstCode(context.Background(), "fresh", s); err == nil || err.Error() != tc.want.Error() {
 				t.Errorf("awaitFirstCode = %v, want %v", err, tc.want)
 			}
 		})
@@ -650,7 +659,7 @@ func TestLinkPhoneAnswerEnds(t *testing.T) {
 				cancel()
 				want = context.Canceled
 			}
-			if r := result(t, res); !errors.Is(r.err, want) || (r.tk != LinkTicket{}) {
+			if r := result(t, res); !errors.Is(r.err, want) || !noTicket(r.tk) {
 				t.Errorf("Link = %+v, %v; want %v", r.tk, r.err, want)
 			}
 			s := sessOf(m, "fresh")
@@ -695,7 +704,7 @@ func TestLinkPhoneEndsInFlight(t *testing.T) {
 			close(release)
 
 			r := result(t, res)
-			if r.err == nil || r.err.Error() != codeExpired || (r.tk != LinkTicket{}) {
+			if r.err == nil || r.err.Error() != codeExpired || !noTicket(r.tk) {
 				t.Errorf("Link = %+v, %v; want no code, and %q", r.tk, r.err, codeExpired)
 			}
 			if got := infoOf(m, "fresh"); got.Status != StatusNeedsLink || got.Reason != codeExpired {
@@ -740,7 +749,7 @@ func TestLinkPhoneOverlap(t *testing.T) {
 				t.Fatalf("the second add = %+v, %v; want its code", r.tk, r.err)
 			}
 			close(release)
-			if r := result(t, first); r.err == nil || r.err.Error() != cancelledReason || (r.tk != LinkTicket{}) {
+			if r := result(t, first); r.err == nil || r.err.Error() != cancelledReason || !noTicket(r.tk) {
 				t.Errorf("the first add = %+v, %v; want no code, and %q", r.tk, r.err, cancelledReason)
 			}
 			calls := phoneCalls(fn)
@@ -779,7 +788,7 @@ func TestLinkPhoneHungConnect(t *testing.T) {
 	res := linkAsync(m, "fresh", typedPhone)
 	<-entered
 	r := result(t, res)
-	if r.err == nil || r.err.Error() != couldNotReach || (r.tk != LinkTicket{}) {
+	if r.err == nil || r.err.Error() != couldNotReach || !noTicket(r.tk) {
 		t.Fatalf("Link = %+v, %v; want the error %q", r.tk, r.err, couldNotReach)
 	}
 	s := sessOf(m, "fresh")
@@ -809,7 +818,7 @@ func TestLinkPhoneSilence(t *testing.T) {
 		m := f.start(t, fn.network(readyGlobals()))
 		m.qrSilence = silence // codeWait is longer: it is the channel that ends this
 		r := link(t, m, "fresh", typedPhone)
-		if r.err == nil || r.err.Error() != couldNotReach || (r.tk != LinkTicket{}) {
+		if r.err == nil || r.err.Error() != couldNotReach || !noTicket(r.tk) {
 			t.Errorf("Link = %+v, %v; want the error %q", r.tk, r.err, couldNotReach)
 		}
 		if got := infoOf(m, "fresh"); got.Status != StatusNeedsLink || got.Reason != couldNotReach {
@@ -944,7 +953,7 @@ func TestLinkPhoneRestarts(t *testing.T) {
 			t.Fatal(err)
 		}
 		s1 := sessOf(m, "fresh")
-		tk, err := m.Link(ctx, "fresh", "")
+		tk, err := m.Link(ctx, LinkRequest{Nick: "fresh"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1015,7 +1024,7 @@ func TestLoginLeavesACodePairingAlone(t *testing.T) {
 
 	// The start of a page, whatever nonce it carried, as one that passed the
 	// nonce check before the add would make it.
-	if s2, err := m.add(ctx, "fresh"); s2 != nil || !errors.Is(err, errCodeSession) {
+	if s2, err := m.add(ctx, "fresh"); s2 != nil || !errors.Is(err, errNotPageSession) {
 		t.Errorf("add as the page = %v, %v; want it refused", s2, err)
 	}
 	untouched("page start")

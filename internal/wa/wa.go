@@ -32,14 +32,26 @@ type AccountInfo struct {
 	Messages  int
 }
 
-// LinkTicket is what the user needs to finish linking: a local QR page or a
-// pairing code to type on the phone, or nothing but the news that the
-// account reconnects with the keys it has.
+// LinkRequest is a call of the add tool (plan 5.3). Phone and QRImage are two
+// ways to link that exclude each other; with neither, the answer is a link to
+// a local QR page.
+type LinkRequest struct {
+	Nick    string
+	Phone   string // a pairing code for this number, to type on the phone
+	QRImage bool   // the QR code itself, as an image for the chat
+}
+
+// LinkTicket is what the user needs to finish linking: a local QR page, a QR
+// code as an image for the chat, or a pairing code to type on the phone, or
+// nothing but the news that the account reconnects with the keys it has.
 type LinkTicket struct {
-	LoginURL     string
-	PairCode     string
+	LoginURL string
+	PairCode string
+	QRPNG    []byte // the QR code to scan, as a PNG
+	// ExpiresAt is the end of the link, of the QR code in QRPNG or of the
+	// pairing code's window (see issueQR and issueCode).
 	ExpiresAt    time.Time
-	Reconnecting bool // no URL and no code: the existing device connects again
+	Reconnecting bool // no URL, no image and no code: the existing device connects again
 }
 
 type RemoveResult struct {

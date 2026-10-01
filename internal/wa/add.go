@@ -101,12 +101,13 @@ func (m *Manager) add(ctx context.Context, nick string) (*pairSession, error) {
 	return s, err
 }
 
-// errCodeSession is what the login page's start of a pairing gets when the
-// account's pairing waits for a code typed on the phone: that one is not the
+// errNotPageSession is what the login page's start of a pairing gets when the
+// account's pairing is not one of a login page: it waits for a code typed on the
+// phone, or its QR code is an image in the chat. Such a pairing is not the
 // page's to restart. The add that began it ended the link of the page, so this
 // is for a poll that was already under way then, or whose nonce an add without
-// a phone number issued while the one with it was starting the pairing.
-var errCodeSession = errors.New("the account is being linked by a pairing code")
+// a phone number issued while the one that began the pairing was starting it.
+var errNotPageSession = errors.New("the account is being linked by a pairing code or in the chat, not by a login page")
 
 // admit is the core of the add tool for nick: it refuses with the reason as
 // the error, reconnects the account's device, or finds that the account needs
@@ -115,15 +116,17 @@ var errCodeSession = errors.New("the account is being linked by a pairing code")
 //
 // The kind says who asks. The add tool without a phone number passes kindNone:
 // its pairing starts only when the login page polls (kindPage), so an unopened
-// link costs no session. With a phone number it passes kindPhone and the
-// number's digits, user: before it cancels or starts anything, and only for a
-// decision to pair (a reconnect ignores the number, and a refusal of the policy
-// comes first), the number must be one the account may take (phoneRefusal). A
-// nick that is refused for it does not get an account, which would show up in
-// list; otherwise the account exists from the first call on. The tool and the
-// page each decide for themselves, and the page's answer is the one the user
-// sees: a status that moved in between, say the account got linked, shows there
-// as a failed or a reconnecting login, never as a second pairing.
+// link costs no session. With qr_image it passes kindChat, which starts the
+// pairing at once, as its first QR code is the answer. With a phone number it
+// passes kindPhone and the number's digits, user: before it cancels or starts
+// anything, and only for a decision to pair (a reconnect ignores the number,
+// and a refusal of the policy comes first), the number must be one the account
+// may take (phoneRefusal). A nick that is refused for it does not get an
+// account, which would show up in list; otherwise the account exists from the
+// first call on. The tool and the page each decide for themselves, and the
+// page's answer is the one the user sees: a status that moved in between, say
+// the account got linked, shows there as a failed or a reconnecting login,
+// never as a second pairing.
 //
 // Each decision is taken, and acted on, under one hold of mu, so a status that
 // moves while a pairing is cancelled or built is decided again. Waiting for a
@@ -194,9 +197,9 @@ func (m *Manager) admit(ctx context.Context, nick string, kind pairKind, user st
 		case addRestart:
 			prev := a.sess
 			m.mu.Unlock()
-			if kind == kindPage && prev.kind == kindPhone {
+			if kind == kindPage && prev.kind != kindPage { // a page restarts only its own kind
 				s.drop()
-				return 0, nil, errCodeSession
+				return 0, nil, errNotPageSession
 			}
 			// false: the phone has just scanned it, and the next round refuses.
 			if prev.stop() {
