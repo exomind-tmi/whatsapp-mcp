@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"log/slog"
 	"net"
@@ -21,12 +23,28 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/exomind-tmi/whatsapp-mcp/internal/qr"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/tools"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/tools/toolstest"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/wa"
 )
 
 const goodNonce = "Zm9vYmFyYmF6cXV4MTIzNA" // 22 characters, as a real one
+
+// waCode has the length and the alphabet of what WhatsApp's QR channel sends
+// (see the qr package's tests).
+const waCode = "2@AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrSt," +
+	"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhI=," +
+	"ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210ZyXwVuTsR=,AbCdEfGhIjKlMnOpQrStUv=="
+
+func decodePNG(t *testing.T, b []byte) image.Image {
+	t.Helper()
+	img, err := png.Decode(bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("not a PNG: %v", err)
+	}
+	return img
+}
 
 // fakeLogin is the login backend: one live nonce for one nick, as the
 // Manager's, and the state it shows. The nonce rules themselves are tested
@@ -288,7 +306,7 @@ func TestLoginState(t *testing.T) {
 	if img.Bounds().Empty() {
 		t.Error("the image is empty")
 	}
-	want, _ := qrPNG(waCode)
+	want, _ := qr.PNG(waCode)
 	if !bytes.Equal(raw, want) {
 		t.Error("the image is not the code's")
 	}

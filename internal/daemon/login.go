@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/exomind-tmi/whatsapp-mcp/internal/qr"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/wa"
 )
 
@@ -124,7 +125,7 @@ type stateJSON struct {
 func (h *loginHandler) writeState(w http.ResponseWriter, nick string, st wa.LoginState) {
 	out := stateJSON{State: st.State, Reason: st.Reason, Hint: st.Hint}
 	if st.Code != "" {
-		png, err := qrPNG(st.Code)
+		png, err := qr.PNG(st.Code)
 		if err != nil {
 			h.log.Warn("draw the QR code", "account", nick, "err", err) // not the code (plan 10)
 			http.Error(w, "internal error", http.StatusInternalServerError)

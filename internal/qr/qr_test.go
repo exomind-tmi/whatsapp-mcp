@@ -1,4 +1,4 @@
-package daemon
+package qr
 
 import (
 	"bytes"
@@ -27,7 +27,7 @@ func decodePNG(t *testing.T, b []byte) image.Image {
 
 func TestQRPNG(t *testing.T) {
 	for _, content := range []string{waCode, "2@x", strings.Repeat("a", 20)} {
-		b, err := qrPNG(content)
+		b, err := PNG(content)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -74,15 +74,15 @@ func TestQRPNG(t *testing.T) {
 }
 
 func TestQRPNGDiffers(t *testing.T) {
-	a, _ := qrPNG(waCode)
-	b, _ := qrPNG(strings.Replace(waCode, "2@", "2@x", 1))
+	a, _ := PNG(waCode)
+	b, _ := PNG(strings.Replace(waCode, "2@", "2@x", 1))
 	if bytes.Equal(a, b) {
 		t.Error("two codes drew the same image")
 	}
 }
 
 func TestQRPNGTooLong(t *testing.T) {
-	if _, err := qrPNG(strings.Repeat("a", 8000)); err == nil {
+	if _, err := PNG(strings.Repeat("a", 8000)); err == nil {
 		t.Error("a code that does not fit a QR symbol was drawn")
 	}
 }
