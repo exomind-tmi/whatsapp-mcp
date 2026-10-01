@@ -98,6 +98,8 @@ func (d Deps) listAccounts(ctx context.Context) ManageOut {
 			ExpiresAt: isoTime(a.ExpiresAt),
 			Phone:     a.Phone,
 			PushName:  a.PushName,
+			Chats:     a.Chats,
+			Messages:  a.Messages,
 		})
 	}
 	if len(accs) == 0 {

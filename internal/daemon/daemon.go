@@ -55,8 +55,10 @@ func Run(ctx context.Context, h home.Home, version string) error {
 	}
 	if err != nil {
 		log.Error("daemon failed", "err", err)
+		return err
 	}
-	return err
+	log.Info("stopped") // once run has closed everything
+	return nil
 }
 
 // run serves while the caller holds the lock.
@@ -83,6 +85,7 @@ func run(ctx context.Context, h home.Home, version string, log *slog.Logger) err
 
 	// Listen before building the Manager: the login pages it hands out (M1)
 	// live on this port. Serve closes ln; the defer covers a failure before.
+	// Serving starts only once the Manager is built (see wa.Manager.load).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
@@ -90,8 +93,20 @@ func run(ctx context.Context, h home.Home, version string, log *slog.Logger) err
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	accounts := wa.NewManager()
-	defer accounts.Close() // after srv.Shutdown below, before db.Close (plan 4.4)
+	accounts, err := wa.NewManager(ctx, wa.Config{
+		Log:       log,
+		StorePath: h.StoreDB(),
+		Archive:   db,
+		BaseURL:   fmt.Sprintf("http://127.0.0.1:%d", port),
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { // after srv.Shutdown below, before db.Close (plan 4.4)
+		if err := accounts.Close(); err != nil {
+			log.Warn("close accounts", "err", err)
+		}
+	}()
 
 	stop := make(chan struct{})
 	srv := &http.Server{
@@ -126,7 +141,6 @@ func run(ctx context.Context, h home.Home, version string, log *slog.Logger) err
 	if err := srv.Shutdown(sctx); err != nil {
 		log.Warn("http shutdown", "err", err)
 	}
-	log.Info("stopped")
 	return nil
 }
 

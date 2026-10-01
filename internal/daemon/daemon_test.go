@@ -144,7 +144,27 @@ func TestRunLifecycle(t *testing.T) {
 	if _, err := os.Stat(h.DaemonJSON()); !os.IsNotExist(err) {
 		t.Fatalf("daemon.json left after shutdown: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(h.Dir, "archive.db")); err != nil {
-		t.Fatalf("archive.db not created: %v", err)
+	for _, db := range []string{"archive.db", "store.db"} {
+		if _, err := os.Stat(filepath.Join(h.Dir, db)); err != nil {
+			t.Fatalf("%s not created: %v", db, err)
+		}
+	}
+}
+
+// TestRunManagerFails: a store.db the Manager cannot open stops the daemon
+// before it serves, with the error and without daemon.json.
+func TestRunManagerFails(t *testing.T) {
+	h := home.Home{Dir: testutil.TempDir(t)}
+	if err := h.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(h.StoreDB(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), h, "v0.1.0"); err == nil || !strings.Contains(err.Error(), "store.db") {
+		t.Fatalf("Run = %v, want store.db's error", err)
+	}
+	if _, err := os.Stat(h.DaemonJSON()); !os.IsNotExist(err) {
+		t.Fatalf("daemon.json left behind: %v", err)
 	}
 }

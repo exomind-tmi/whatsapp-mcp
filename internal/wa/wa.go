@@ -1,9 +1,8 @@
 // Package wa manages WhatsApp accounts. It is the only package that imports
-// whatsmeow; until the M1 Manager lands, Manager is a stub with no accounts.
+// whatsmeow.
 package wa
 
 import (
-	"context"
 	"errors"
 	"regexp"
 	"strings"
@@ -29,6 +28,8 @@ type AccountInfo struct {
 	ExpiresAt time.Time // zero unless the status is temporary (e.g. a ban)
 	Phone     string
 	PushName  string
+	Chats     int // archived chats and messages of the account
+	Messages  int
 }
 
 // LinkTicket is what the user needs to finish linking: a local QR page or a
@@ -71,21 +72,3 @@ func ValidPhone(s string) bool {
 
 // ErrNotImplemented is returned by operations that arrive in a later milestone.
 var ErrNotImplemented = errors.New("not implemented until M1: linking and removing WhatsApp accounts arrives with the WhatsApp client in the next milestone")
-
-// Manager is the M0 stub: no accounts, linking not available yet.
-type Manager struct{}
-
-func NewManager() *Manager { return &Manager{} }
-
-func (*Manager) Accounts(context.Context) []AccountInfo { return nil }
-
-func (*Manager) Link(context.Context, string, string) (LinkTicket, error) {
-	return LinkTicket{}, ErrNotImplemented
-}
-
-func (*Manager) Remove(context.Context, string) (RemoveResult, error) {
-	return RemoveResult{}, ErrNotImplemented
-}
-
-// Close disconnects all clients.
-func (*Manager) Close() error { return nil }

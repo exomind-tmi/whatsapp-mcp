@@ -160,12 +160,12 @@ var expires = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 
 func TestManageAccountsList(t *testing.T) {
 	fake := &toolstest.WA{Accs: []wa.AccountInfo{
-		{Nick: "personal", Status: wa.StatusConnected, Phone: "+70000000000", PushName: "Anton"},
+		{Nick: "personal", Status: wa.StatusConnected, Phone: "+70000000000", PushName: "Anton", Chats: 3, Messages: 42},
 		{Nick: "work", Status: wa.StatusError, Reason: "temporarily banned", ExpiresAt: expires},
 	}}
 	_, text := call(t, connect(t, fake), map[string]any{"action": "list"})
 	want := `{"accounts":[
-		{"account_id":"personal","status":"connected","phone":"+70000000000","push_name":"Anton","chats":0,"messages":0},
+		{"account_id":"personal","status":"connected","phone":"+70000000000","push_name":"Anton","chats":3,"messages":42},
 		{"account_id":"work","status":"error","reason":"temporarily banned","expires_at":"` + expires.Local().Format(time.RFC3339) + `","chats":0,"messages":0}]}`
 	if !sameJSON(t, text, want) {
 		t.Fatalf("list = %s\nwant   %s", text, want)
