@@ -36,10 +36,9 @@ jobs:
       # Includes tests/launcher: the launcher of this OS against a fake release.
       - name: go test
         run: go test ./...
-      # The account manager is goroutines and locks all the way down; the race
-      # detector needs cgo, which the Windows runner of this matrix lacks.
+      # The account manager is goroutines and locks all the way down. The race
+      # detector needs cgo: both runners ship a C compiler.
       - name: go test -race
-        if: runner.os == 'Linux'
         run: go test -race ./internal/...
       - name: Cross builds
         run: VERSION=v0.0.0-ci scripts/build.sh
