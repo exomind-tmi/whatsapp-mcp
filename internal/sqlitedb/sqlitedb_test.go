@@ -42,6 +42,27 @@ func TestOpenInPlace(t *testing.T) {
 	}
 }
 
+// TestPragmas checks the driver applies every shared setting: it ignores a
+// misspelt pragma without a word.
+func TestPragmas(t *testing.T) {
+	db, err := Open(filepath.Join(testutil.TempDir(t), "x.db"), Pragmas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for pragma, want := range map[string]string{
+		"journal_mode":  "wal",
+		"busy_timeout":  "10000",
+		"synchronous":   "1", // NORMAL
+		"secure_delete": "1",
+	} {
+		var got string
+		if err := db.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil || got != want {
+			t.Errorf("PRAGMA %s = %q, %v; want %q", pragma, got, err, want)
+		}
+	}
+}
+
 // TestOpenUNC reaches a temp dir through the administrative share, the way
 // a redirected profile is reached. Skipped where that share is unavailable.
 func TestOpenUNC(t *testing.T) {

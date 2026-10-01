@@ -1,11 +1,12 @@
-// Package wa manages WhatsApp accounts. It will be the only package that
-// imports whatsmeow (M1); in M0 Manager is a stub with no accounts.
+// Package wa manages WhatsApp accounts. It is the only package that imports
+// whatsmeow; until the M1 Manager lands, Manager is a stub with no accounts.
 package wa
 
 import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -46,6 +47,27 @@ var nickRe = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
 // ValidNick reports whether s is an acceptable account nickname.
 func ValidNick(s string) bool { return nickRe.MatchString(s) }
+
+// phoneRe admits a number as people write it: an optional leading +,
+// digits, spaces, dashes and parentheses.
+var phoneRe = regexp.MustCompile(`^\+?[0-9 ()-]+$`)
+
+// ValidPhone reports whether s is a number PairPhone accepts. PairPhone
+// drops every non-digit and wants more than 6 digits not starting with 0,
+// i.e. in international form (pair-code.go:97-102); letters are refused
+// here rather than dropped, and E.164 caps a number at 15 digits.
+func ValidPhone(s string) bool {
+	if !phoneRe.MatchString(s) {
+		return false
+	}
+	d := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, s)
+	return len(d) > 6 && len(d) <= 15 && d[0] != '0'
+}
 
 // ErrNotImplemented is returned by operations that arrive in a later milestone.
 var ErrNotImplemented = errors.New("not implemented until M1: linking and removing WhatsApp accounts arrives with the WhatsApp client in the next milestone")

@@ -17,12 +17,6 @@ import (
 // ErrNewerSchema means archive.db was written by a newer whatsapp-mcp.
 var ErrNewerSchema = errors.New("archive.db was created by a newer whatsapp-mcp")
 
-// pragmas are shared by the writer and the migrator, which differ only in
-// foreign_keys. secure_delete zeroes freed pages: manage-accounts remove
-// promises the archive is gone from this computer, not merely unlinked from
-// the b-tree and still readable in the file.
-const pragmas = "_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=secure_delete(1)&_txlock=immediate"
-
 type DB struct{ w *sql.DB }
 
 // Open opens archive.db, creating it if needed, brings its schema up to
@@ -33,7 +27,7 @@ func Open(path string) (*DB, error) {
 	if err := migrate(path); err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	w, err := sqlitedb.Open(path, "_pragma=foreign_keys(1)&"+pragmas)
+	w, err := sqlitedb.Open(path, "_pragma=foreign_keys(1)&"+sqlitedb.Pragmas)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +47,7 @@ func Open(path string) (*DB, error) {
 // DROP's implicit DELETE into every chat and message of every account.
 // foreign_key_check then stands in for the checks that were off.
 func migrate(path string) error {
-	m, err := sqlitedb.Open(path, "_pragma=foreign_keys(0)&"+pragmas)
+	m, err := sqlitedb.Open(path, "_pragma=foreign_keys(0)&"+sqlitedb.Pragmas)
 	if err != nil {
 		return err
 	}

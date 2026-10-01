@@ -10,21 +10,37 @@ their full license texts as `whatsapp-mcp_<version>_licenses.zip`.
 |---|---|---|
 | [Go standard library and runtime](https://go.dev/LICENSE) | toolchain | BSD-3-Clause |
 | [SQLite](https://sqlite.org/copyright.html) (translated to Go by modernc.org/sqlite) | bundled | Public domain |
+| [filippo.io/edwards25519](https://pkg.go.dev/filippo.io/edwards25519@v1.2.0?tab=licenses) | v1.2.0 | BSD-3-Clause |
+| [github.com/beeper/argo-go](https://pkg.go.dev/github.com/beeper/argo-go@v1.1.2?tab=licenses) | v1.1.2 | MIT |
+| [github.com/coder/websocket](https://pkg.go.dev/github.com/coder/websocket@v1.8.15?tab=licenses) | v1.8.15 | ISC |
 | [github.com/dustin/go-humanize](https://pkg.go.dev/github.com/dustin/go-humanize@v1.0.1?tab=licenses) | v1.0.1 | MIT |
+| [github.com/elliotchance/orderedmap/v3](https://pkg.go.dev/github.com/elliotchance/orderedmap/v3@v3.1.0?tab=licenses) | v3.1.0 | MIT |
 | [github.com/google/jsonschema-go/jsonschema](https://pkg.go.dev/github.com/google/jsonschema-go@v0.4.3?tab=licenses) | v0.4.3 | MIT |
 | [github.com/google/uuid](https://pkg.go.dev/github.com/google/uuid@v1.6.0?tab=licenses) | v1.6.0 | BSD-3-Clause |
+| [github.com/mattn/go-colorable](https://pkg.go.dev/github.com/mattn/go-colorable@v0.1.14?tab=licenses) | v0.1.14 | MIT |
 | [github.com/mattn/go-isatty](https://pkg.go.dev/github.com/mattn/go-isatty@v0.0.24?tab=licenses) | v0.0.24 | MIT |
 | [github.com/modelcontextprotocol/go-sdk](https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v1.8.0?tab=licenses) | v1.8.0 | Apache-2.0 AND MIT |
 | [github.com/ncruces/go-strftime](https://pkg.go.dev/github.com/ncruces/go-strftime@v1.0.0?tab=licenses) | v1.0.0 | MIT |
+| [github.com/petermattis/goid](https://pkg.go.dev/github.com/petermattis/goid@v0.0.0-20260820044319-269ab09b5261?tab=licenses) | v0.0.0-20260820044319-269ab09b5261 | Apache-2.0 |
 | [github.com/remyoudompheng/bigfft](https://pkg.go.dev/github.com/remyoudompheng/bigfft@v0.0.0-20230129092748-24d4a6f8daec?tab=licenses) | v0.0.0-20230129092748-24d4a6f8daec | BSD-3-Clause |
+| [github.com/rs/zerolog](https://pkg.go.dev/github.com/rs/zerolog@v1.35.1?tab=licenses) | v1.35.1 | MIT |
 | [github.com/segmentio/asm](https://pkg.go.dev/github.com/segmentio/asm@v1.1.3?tab=licenses) | v1.1.3 | MIT |
 | [github.com/segmentio/encoding](https://pkg.go.dev/github.com/segmentio/encoding@v0.5.4?tab=licenses) | v0.5.4 | MIT |
+| [github.com/vektah/gqlparser/v2/ast](https://pkg.go.dev/github.com/vektah/gqlparser/v2@v2.5.27?tab=licenses) | v2.5.27 | MIT |
 | [github.com/yosida95/uritemplate/v3](https://pkg.go.dev/github.com/yosida95/uritemplate/v3@v3.0.2?tab=licenses) | v3.0.2 | BSD-3-Clause |
+| [go.mau.fi/libsignal](https://pkg.go.dev/go.mau.fi/libsignal@v0.2.2?tab=licenses) | v0.2.2 | GPL-3.0 |
+| [go.mau.fi/util](https://pkg.go.dev/go.mau.fi/util@v0.10.1?tab=licenses) | v0.10.1 | MPL-2.0 |
+| [go.mau.fi/whatsmeow](https://pkg.go.dev/go.mau.fi/whatsmeow@v0.0.0-20260929112325-8b41cfe6d9c4?tab=licenses) | v0.0.0-20260929112325-8b41cfe6d9c4 | MPL-2.0 |
+| [golang.org/x/crypto](https://pkg.go.dev/golang.org/x/crypto@v0.57.0?tab=licenses) | v0.57.0 | BSD-3-Clause |
+| [golang.org/x/exp/constraints](https://pkg.go.dev/golang.org/x/exp@v0.0.0-20260908205506-85c1c2202aba?tab=licenses) | v0.0.0-20260908205506-85c1c2202aba | BSD-3-Clause |
 | [golang.org/x/mod/semver](https://pkg.go.dev/golang.org/x/mod@v0.41.0?tab=licenses) | v0.41.0 | BSD-3-Clause |
+| [golang.org/x/net](https://pkg.go.dev/golang.org/x/net@v0.59.0?tab=licenses) | v0.59.0 | BSD-3-Clause |
 | [golang.org/x/oauth2](https://pkg.go.dev/golang.org/x/oauth2@v0.35.0?tab=licenses) | v0.35.0 | BSD-3-Clause |
-| [golang.org/x/sync/errgroup](https://pkg.go.dev/golang.org/x/sync@v0.23.0?tab=licenses) | v0.23.0 | BSD-3-Clause |
+| [golang.org/x/sync](https://pkg.go.dev/golang.org/x/sync@v0.23.0?tab=licenses) | v0.23.0 | BSD-3-Clause |
 | [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys@v0.48.0?tab=licenses) | v0.48.0 | BSD-3-Clause |
+| [golang.org/x/text](https://pkg.go.dev/golang.org/x/text@v0.42.0?tab=licenses) | v0.42.0 | BSD-3-Clause |
 | [golang.org/x/time/rate](https://pkg.go.dev/golang.org/x/time@v0.15.0?tab=licenses) | v0.15.0 | BSD-3-Clause |
+| [google.golang.org/protobuf](https://pkg.go.dev/google.golang.org/protobuf@v1.36.12?tab=licenses) | v1.36.12 | BSD-3-Clause |
 | [modernc.org/libc](https://pkg.go.dev/modernc.org/libc@v1.77.1?tab=licenses) | v1.77.1 | BSD-3-Clause |
 | [modernc.org/mathutil](https://pkg.go.dev/modernc.org/mathutil@v1.7.1?tab=licenses) | v1.7.1 | BSD-3-Clause |
 | [modernc.org/memory](https://pkg.go.dev/modernc.org/memory@v1.12.1?tab=licenses) | v1.12.1 | BSD-3-Clause |
