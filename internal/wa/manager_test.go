@@ -30,11 +30,36 @@ var errHandshake = errors.New("noise handshake failed: timed out waiting for han
 
 // fakeNet stands in for WhatsApp's servers.
 type fakeNet struct {
-	fails map[string][]error          // phone: what its Connects return before one succeeds
-	hold  func(cli *whatsmeow.Client) // runs inside Connect, e.g. to block it
+	fails     map[string][]error          // phone: what its Connects return before one succeeds
+	hold      func(cli *whatsmeow.Client) // runs inside Connect, e.g. to block it
+	connected map[string]bool             // phone: whether its socket is up, for Logout
+	logoutErr error                       // what Logout of a connected client returns; on nil it deletes the device, as whatsmeow does
 
 	mu    sync.Mutex
-	calls []string // "connect <phone>" once Connect returns, "disconnect <phone>"
+	calls []string // "connect <phone>" once Connect returns, "disconnect <phone>", "logout <phone>", "qr <phone>"
+	qrs   []fakeQR // one per GetQRChannel
+}
+
+// fakeQR is a QR channel the test feeds.
+type fakeQR struct {
+	cli *whatsmeow.Client
+	ctx context.Context
+	ch  chan whatsmeow.QRChannelItem
+}
+
+// phoneOf names a client in the calls: its phone, or "pairing" before it
+// has a device ID.
+func phoneOf(cli *whatsmeow.Client) string {
+	if id := cli.Store.ID; id != nil {
+		return id.User
+	}
+	return "pairing"
+}
+
+func (f *fakeNet) record(call string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, call)
 }
 
 func (f *fakeNet) network(g *waGlobals) network {
@@ -47,7 +72,7 @@ func (f *fakeNet) network(g *waGlobals) network {
 			}
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			phone := cli.Store.ID.User
+			phone := phoneOf(cli)
 			f.calls = append(f.calls, "connect "+phone)
 			if errs := f.fails[phone]; len(errs) > 0 {
 				f.fails[phone] = errs[1:]
@@ -56,15 +81,48 @@ func (f *fakeNet) network(g *waGlobals) network {
 			return nil
 		},
 		disconnect: func(cli *whatsmeow.Client) {
-			f.mu.Lock()
-			defer f.mu.Unlock()
-			call := "disconnect " + cli.Store.ID.User
+			call := "disconnect " + phoneOf(cli)
 			if cli.BackgroundEventCtx.Err() == nil {
 				call += " before cancel"
 			}
-			f.calls = append(f.calls, call)
+			f.record(call)
+		},
+		logout: func(cli *whatsmeow.Client, ctx context.Context) error {
+			phone := phoneOf(cli)
+			f.record("logout " + phone)
+			f.mu.Lock()
+			connected := f.connected[phone]
+			f.mu.Unlock()
+			switch {
+			case cli.Store.ID == nil:
+				return whatsmeow.ErrNotLoggedIn
+			case !connected:
+				return whatsmeow.ErrNotConnected
+			case f.logoutErr != nil:
+				return f.logoutErr
+			}
+			return cli.Store.Delete(ctx)
+		},
+		qrChannel: func(cli *whatsmeow.Client, ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			ch := make(chan whatsmeow.QRChannelItem, 8)
+			f.calls = append(f.calls, "qr "+phoneOf(cli))
+			f.qrs = append(f.qrs, fakeQR{cli: cli, ctx: ctx, ch: ch})
+			return ch, nil
 		},
 	}
+}
+
+// qr returns the channel of the i-th pairing.
+func (f *fakeNet) qr(t *testing.T, i int) fakeQR {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i >= len(f.qrs) {
+		t.Fatalf("pairing %d has no QR channel; %d so far", i, len(f.qrs))
+	}
+	return f.qrs[i]
 }
 
 // called returns the calls so far, sorted unless in order.
@@ -142,17 +200,23 @@ func (f *fixture) devices(t *testing.T, pushNames map[string]string) {
 	defer c.Close()
 	for phone, name := range pushNames {
 		d := c.NewDevice()
-		jid := adJID(phone)
-		d.ID, d.PushName = &jid, name
-		d.Account = &waAdv.ADVSignedDeviceIdentity{
-			Details:             []byte{1},
-			AccountSignature:    make([]byte, 64),
-			AccountSignatureKey: make([]byte, 32),
-			DeviceSignature:     make([]byte, 64),
-		}
-		if err := d.Save(ctx); err != nil {
-			t.Fatal(err)
-		}
+		d.PushName = name
+		saveDevice(t, d, adJID(phone))
+	}
+}
+
+// saveDevice gives d the ID jid and saves it, as a pairing does.
+func saveDevice(t *testing.T, d *store.Device, jid types.JID) {
+	t.Helper()
+	d.ID = &jid
+	d.Account = &waAdv.ADVSignedDeviceIdentity{
+		Details:             []byte{1},
+		AccountSignature:    make([]byte, 64),
+		AccountSignatureKey: make([]byte, 32),
+		DeviceSignature:     make([]byte, 64),
+	}
+	if err := d.Save(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

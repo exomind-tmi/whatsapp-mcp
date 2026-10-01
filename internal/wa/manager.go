@@ -45,6 +45,8 @@ type network struct {
 	globals    *waGlobals
 	connect    func(*whatsmeow.Client) error
 	disconnect func(*whatsmeow.Client)
+	logout     func(*whatsmeow.Client, context.Context) error
+	qrChannel  func(*whatsmeow.Client, context.Context) (<-chan whatsmeow.QRChannelItem, error)
 	retryStep  time.Duration // the backoff added per failed connect
 }
 
@@ -52,39 +54,64 @@ var liveNetwork = network{
 	globals:    globals,
 	connect:    (*whatsmeow.Client).Connect,
 	disconnect: (*whatsmeow.Client).Disconnect,
+	logout:     (*whatsmeow.Client).Logout,
+	qrChannel:  (*whatsmeow.Client).GetQRChannel,
 	retryStep:  2 * time.Second, // whatsmeow's own (client.go:634)
 }
 
 // Manager owns the WhatsApp client of every account and keeps each one's
 // status in memory (plan 6.6).
 type Manager struct {
-	log       *slog.Logger
-	db        *archive.DB
-	store     *sqlstore.Container
-	baseURL   string
-	net       network
-	closeWait time.Duration
+	log        *slog.Logger
+	db         *archive.DB
+	store      *sqlstore.Container
+	baseURL    string
+	net        network
+	closeWait  time.Duration
+	pairedWait time.Duration
+	qrSilence  time.Duration
 
 	// ctx is every client's BackgroundEventCtx: keepalive and whatsmeow's
 	// reconnects run on it (client.go:500-502, 583-584). It is the daemon's
 	// and ends on Close, as /admin/stop does not cancel the daemon's own.
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup // the connects; Add happens only in newManager, before Close can run
+	wg     sync.WaitGroup // the connects and pairings; Add only under mu while !closed
 
 	// mu is never held while calling into whatsmeow: dispatchEvent holds the
 	// client's handler lock while our handler waits for mu (client.go:980-990).
 	mu       sync.Mutex
 	accounts map[string]*account
+	closed   bool
 
 	closeOnce sync.Once
 	closeErr  error
 }
 
+// account is under Manager.mu, nick aside. Its status follows the events
+// of one client only: the pairing one while a pairing owns it, the
+// account's own otherwise. A dropped client's late events, such as its
+// LoggedOut, would otherwise move the status of the device now in use.
 type account struct {
-	nick string            // also in info, which is written whole under mu
-	info AccountInfo       // under Manager.mu
-	cli  *whatsmeow.Client // nil while the account has no device
+	nick  string // also in info, which is written whole
+	info  AccountInfo
+	phone string            // accounts.jid's user part, the number the account is bound to; "" until first linked
+	cli   *whatsmeow.Client // nil while the account has no device
+	pcli  *whatsmeow.Client // the pairing client while it owns the status, else nil
+	sess  *pairSession      // the latest pairing, kept after it ends for the login page
+}
+
+// newAccount is an account with no device.
+func newAccount(nick string) *account {
+	return &account{nick: nick, info: AccountInfo{Nick: nick, Status: StatusNeedsLink, Reason: "not linked yet"}}
+}
+
+// owner is the client whose events move the account's status.
+func (a *account) owner() *whatsmeow.Client {
+	if a.pcli != nil {
+		return a.pcli
+	}
+	return a.cli
 }
 
 // NewManager opens store.db, loads the accounts and connects those with a
@@ -99,13 +126,15 @@ func newManager(ctx context.Context, cfg Config, net network) (*Manager, error) 
 		return nil, err
 	}
 	m := &Manager{
-		log:       cfg.Log,
-		db:        cfg.Archive,
-		store:     st,
-		baseURL:   cfg.BaseURL,
-		net:       net,
-		closeWait: closeWait,
-		accounts:  map[string]*account{},
+		log:        cfg.Log,
+		db:         cfg.Archive,
+		store:      st,
+		baseURL:    cfg.BaseURL,
+		net:        net,
+		closeWait:  closeWait,
+		pairedWait: pairedWait,
+		qrSilence:  qrSilence,
+		accounts:   map[string]*account{},
 	}
 	m.ctx, m.cancel = context.WithCancel(ctx)
 	if err := m.load(ctx); err != nil {
@@ -124,11 +153,12 @@ func newManager(ctx context.Context, cfg Config, net network) (*Manager, error) 
 
 // load builds the accounts from archive.db and their devices in store.db.
 //
-// A device no account points to is an orphan and is deleted. Pairing (step
-// 6) records accounts.jid in PrePairCallback, before whatsmeow saves the new
+// A device no account points to is an orphan and is deleted. Pairing
+// records accounts.jid in PrePairCallback, before whatsmeow saves the new
 // device (pair.go:204 vs 226), so a fresh pairing never leaves one; orphans
-// are the old devices of a relink cut short by a crash. The sweep runs
-// before the daemon serves, so it never sees a pairing in progress.
+// are the old devices of a relink cut short by a crash before dropOld. The
+// sweep runs before the daemon serves, so it never sees a pairing in
+// progress.
 func (m *Manager) load(ctx context.Context) error {
 	accs, err := m.db.Accounts(ctx)
 	if err != nil {
@@ -145,10 +175,9 @@ func (m *Manager) load(ctx context.Context) error {
 	}
 
 	for _, acc := range accs {
-		a := &account{nick: acc.Nick, info: AccountInfo{Nick: acc.Nick, Status: StatusNeedsLink}}
+		a := newAccount(acc.Nick)
 		m.accounts[acc.Nick] = a
 		if acc.JID == "" {
-			a.info.Reason = "not linked yet"
 			continue
 		}
 		jid, err := types.ParseJID(acc.JID)
@@ -157,6 +186,7 @@ func (m *Manager) load(ctx context.Context) error {
 			a.info.Reason = "the account's device id is invalid; link the account again"
 			continue
 		}
+		a.phone = jid.User
 		dev := byJID[jid.String()]
 		if dev == nil {
 			a.info.Reason = "this computer has no keys for the device; link the account again"
@@ -181,7 +211,7 @@ func (m *Manager) load(ctx context.Context) error {
 
 // newClient is the one place that builds a client, with the settings of
 // plan 6.2; pairing builds its client here too, since that client stays on
-// once linked. PrePairCallback arrives with pairing.
+// once linked, and adds its PrePairCallback.
 func (m *Manager) newClient(a *account, dev *store.Device) *whatsmeow.Client {
 	cli := whatsmeow.NewClient(dev, newWALog(m.log.With("account", a.nick), "Client"))
 	cli.BackgroundEventCtx = m.ctx
@@ -202,44 +232,53 @@ func (m *Manager) newClient(a *account, dev *store.Device) *whatsmeow.Client {
 		cli.AutoReconnectErrors = min(cli.AutoReconnectErrors, maxReconnectErrors)
 		return !errors.Is(err, store.ErrDeviceDeleted) // fails for good (client.go:539-541)
 	}
-	cli.AddEventHandlerWithSuccessStatus(m.handler(a))
+	cli.AddEventHandlerWithSuccessStatus(m.handler(a, cli))
 	return cli
 }
 
-// handler returns the account's event handler. It returns true for every
-// event: false stops the dispatch to the handlers after it, such as a
-// pairing's QR channel (client.go:989-993), and makes whatsmeow withhold the
-// ack (message.go:459-462), which M1, storing no messages, has no use for.
-func (m *Manager) handler(a *account) func(any) bool {
+// handler returns the event handler of the account's client cli. It
+// returns true for every event: false stops the dispatch to the handlers
+// after it, such as a pairing's QR channel (client.go:989-993), and makes
+// whatsmeow withhold the ack (message.go:459-462), which M1, storing no
+// messages, has no use for. It is never removed: RemoveEventHandler would
+// deadlock from inside a handler (client.go:812-820), and the events of a
+// client the account no longer follows are dropped in handle.
+func (m *Manager) handler(a *account, cli *whatsmeow.Client) func(any) bool {
 	return func(evt any) bool {
-		m.handle(a, evt)
+		m.handle(a, cli, evt)
 		return true
 	}
 }
 
-func (m *Manager) handle(a *account, evt any) {
+func (m *Manager) handle(a *account, cli *whatsmeow.Client, evt any) {
 	// Close cancels ctx before Disconnect, so each socket drops as if the
 	// server closed it and whatsmeow sends Disconnected (client.go:599-603):
 	// a false reconnecting per account.
 	if m.ctx.Err() != nil {
 		return
 	}
-	switch e := evt.(type) {
-	case *events.Message:
+	if e, ok := evt.(*events.Message); ok {
 		if n := e.Message.GetProtocolMessage().GetHistorySyncNotification(); n != nil {
 			m.log.Debug("history sync ignored until M2", "account", a.nick, "type", n.GetSyncType().String(), "chunk", n.GetChunkOrder())
 		}
 		return
-	case *events.PushNameSetting:
-		m.mu.Lock()
+	}
+	m.mu.Lock()
+	if cli != a.owner() {
+		m.mu.Unlock()
+		return
+	}
+	if e, ok := evt.(*events.PushNameSetting); ok {
 		a.info.PushName = e.Action.GetName()
 		m.mu.Unlock()
 		return
 	}
-	m.mu.Lock()
 	old := a.info
 	a.info = next(a.info, evt, time.Now())
 	cur := a.info
+	if cli == a.pcli && old.Status == StatusLinking && cur.Status != StatusLinking {
+		a.sess.leave()
+	}
 	m.mu.Unlock()
 	if cur.Status != old.Status || cur.Reason != old.Reason {
 		m.log.Info("account status", "account", a.nick, "status", cur.Status, "reason", cur.Reason)
@@ -252,8 +291,14 @@ func (m *Manager) handle(a *account, evt any) {
 // nil, but not a handshake timeout or an HTTP answer such as a captive
 // portal's (client.go:504-534), which its reconnect loop does retry later
 // on (client.go:645-656); so they are retried here, with the same backoff.
+// Once Close has begun it does nothing.
 func (m *Manager) connect(a *account, cli *whatsmeow.Client) {
-	m.wg.Add(1)
+	m.mu.Lock()
+	ok := m.track()
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
 	go func() {
 		defer m.wg.Done()
 		if m.net.globals.wait(m.ctx) != nil {
@@ -277,6 +322,16 @@ func (m *Manager) connect(a *account, cli *whatsmeow.Client) {
 			}
 		}
 	}()
+}
+
+// track counts a goroutine Close must wait for, unless Close has begun;
+// under mu, which orders every Add before Close's Wait.
+func (m *Manager) track() bool {
+	if m.closed {
+		return false
+	}
+	m.wg.Add(1)
+	return true
 }
 
 // Accounts lists the accounts by nick with their status and archive size.
@@ -315,11 +370,13 @@ func (*Manager) Remove(context.Context, string) (RemoveResult, error) {
 // closeWait is left behind: the process is exiting.
 func (m *Manager) Close() error {
 	m.closeOnce.Do(func() {
-		// Cancel first: it ends the connects still waiting or retrying and
-		// whatsmeow's reconnect loops (client.go:637-643), so no connection
-		// comes up after its Disconnect.
+		// Cancel first: it ends the connects still waiting or retrying,
+		// whatsmeow's reconnect loops (client.go:637-643) and the pairings,
+		// so no connection comes up after its Disconnect. A pairing
+		// disconnects its own client as it ends (runPairing, finishPaired).
 		m.cancel()
 		m.mu.Lock()
+		m.closed = true
 		var clients []*whatsmeow.Client
 		for _, a := range m.accounts {
 			if a.cli != nil {
