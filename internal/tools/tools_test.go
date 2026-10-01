@@ -4,14 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/exomind-tmi/whatsapp-mcp/internal/tools/toolstest"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/wa"
 )
 
@@ -36,17 +41,11 @@ func call(t *testing.T, cs *mcp.ClientSession, args map[string]any) (*mcp.CallTo
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sb strings.Builder
-	for _, c := range res.Content {
-		if tc, ok := c.(*mcp.TextContent); ok {
-			sb.WriteString(tc.Text)
-		}
-	}
-	return res, sb.String()
+	return res, ResultText(res)
 }
 
 func TestServerAdvertisesInstructionsAndPinnedProtocol(t *testing.T) {
-	cs := connect(t, wa.NewManager())
+	cs := connect(t, &toolstest.WA{})
 	init := cs.InitializeResult()
 	if init.Instructions != Instructions {
 		t.Error("instructions not advertised")
@@ -57,7 +56,7 @@ func TestServerAdvertisesInstructionsAndPinnedProtocol(t *testing.T) {
 }
 
 func TestManageAccountsSchema(t *testing.T) {
-	cs := connect(t, wa.NewManager())
+	cs := connect(t, &toolstest.WA{})
 	list, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +92,7 @@ var update = flag.Bool("update", false, "rewrite testdata/*.golden.json")
 // TestToolsListGolden pins the exact schemas clients see: field names,
 // omitempty, descriptions and jsonschema-go's layout are the contract.
 func TestToolsListGolden(t *testing.T) {
-	list, err := connect(t, wa.NewManager()).ListTools(context.Background(), nil)
+	list, err := connect(t, &toolstest.WA{}).ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +117,7 @@ func TestToolsListGolden(t *testing.T) {
 }
 
 func TestEveryListedToolIsKnown(t *testing.T) {
-	list, err := connect(t, wa.NewManager()).ListTools(context.Background(), nil)
+	list, err := connect(t, &toolstest.WA{}).ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +132,7 @@ func TestEveryListedToolIsKnown(t *testing.T) {
 }
 
 func TestManageAccountsListEmpty(t *testing.T) {
-	res, text := call(t, connect(t, wa.NewManager()), map[string]any{"action": "list"})
+	res, text := call(t, connect(t, &toolstest.WA{}), map[string]any{"action": "list"})
 	if res.IsError {
 		t.Fatalf("error: %s", text)
 	}
@@ -142,22 +141,97 @@ func TestManageAccountsListEmpty(t *testing.T) {
 	}
 }
 
-func TestManageAccountsAddValidatesThenReportsM1(t *testing.T) {
-	cs := connect(t, wa.NewManager())
+// sameJSON compares JSON by value: the output contract is the fields and
+// their values, not the key order the SDK happens to write.
+func sameJSON(t *testing.T, got, want string) bool {
+	t.Helper()
+	var g, w any
+	if err := json.Unmarshal([]byte(got), &g); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, got)
+	}
+	if err := json.Unmarshal([]byte(want), &w); err != nil {
+		t.Fatal(err)
+	}
+	return reflect.DeepEqual(g, w)
+}
+
+// ExpiresAt is shown in local time, so the expectations format it the same way.
+var expires = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+
+func TestManageAccountsList(t *testing.T) {
+	fake := &toolstest.WA{Accs: []wa.AccountInfo{
+		{Nick: "personal", Status: wa.StatusConnected, Phone: "+70000000000", PushName: "Anton"},
+		{Nick: "work", Status: wa.StatusError, Reason: "temporarily banned", ExpiresAt: expires},
+	}}
+	_, text := call(t, connect(t, fake), map[string]any{"action": "list"})
+	want := `{"accounts":[
+		{"account_id":"personal","status":"connected","phone":"+70000000000","push_name":"Anton","chats":0,"messages":0},
+		{"account_id":"work","status":"error","reason":"temporarily banned","expires_at":"` + expires.Local().Format(time.RFC3339) + `","chats":0,"messages":0}]}`
+	if !sameJSON(t, text, want) {
+		t.Fatalf("list = %s\nwant   %s", text, want)
+	}
+}
+
+// TestManageAccountsAddRemoveOutput pins the JSON the client sees and what
+// reaches WA; the golden file covers only the schemas.
+func TestManageAccountsAddRemoveOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fake *toolstest.WA
+		args map[string]any
+		call toolstest.Call
+		want string
+	}{
+		{"add qr", &toolstest.WA{Ticket: wa.LinkTicket{LoginURL: "http://127.0.0.1:1/login/x"}},
+			map[string]any{"action": "add", "account_id": "personal"},
+			toolstest.Call{Method: "Link", Nick: "personal"},
+			`{"login_url":"http://127.0.0.1:1/login/x","next_step":"open the link and scan the QR code in WhatsApp → Linked devices","status":"linking"}`},
+		{"add code", &toolstest.WA{Ticket: wa.LinkTicket{PairCode: "ABCD-EFGH", ExpiresAt: expires}},
+			map[string]any{"action": "add", "account_id": "personal", "phone": "+70000000000"},
+			toolstest.Call{Method: "Link", Nick: "personal", Phone: "+70000000000"},
+			`{"next_step":"WhatsApp on the phone → Linked devices → Link with phone number, enter the code","pair_code":"ABCD-EFGH","expires_at":"` +
+				expires.Local().Format(time.RFC3339) + `","status":"linking"}`},
+		{"remove", &toolstest.WA{Removed: wa.RemoveResult{Hint: "remove the device on the phone manually"}},
+			map[string]any{"action": "remove", "account_id": "personal"},
+			toolstest.Call{Method: "Remove", Nick: "personal"},
+			`{"hint":"remove the device on the phone manually","status":"removed"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, text := call(t, connect(t, tc.fake), tc.args)
+			if res.IsError || !sameJSON(t, text, tc.want) {
+				t.Fatalf("isError=%v %s\nwant %s", res.IsError, text, tc.want)
+			}
+			if got := tc.fake.Calls(); !slices.Equal(got, []toolstest.Call{tc.call}) {
+				t.Fatalf("WA calls = %+v, want %+v", got, tc.call)
+			}
+		})
+	}
+}
+
+func TestManageAccountsAddRemoveReportErrors(t *testing.T) {
+	fake := &toolstest.WA{Err: errors.New("linking failed: boom")}
+	cs := connect(t, fake)
 	res, text := call(t, cs, map[string]any{"action": "add", "account_id": "Bad Nick"})
 	if !res.IsError || !strings.Contains(text, "invalid") {
 		t.Fatalf("invalid id: isError=%v %s", res.IsError, text)
 	}
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Fatalf("invalid id reached WA: %v", calls)
+	}
 	for _, action := range []string{"add", "remove"} {
 		res, text = call(t, cs, map[string]any{"action": action, "account_id": "personal"})
-		if !res.IsError || !strings.Contains(text, "not implemented until M1") {
+		if !res.IsError || !strings.Contains(text, "boom") {
 			t.Fatalf("%s: isError=%v %s", action, res.IsError, text)
 		}
+	}
+	want := []toolstest.Call{{Method: "Link", Nick: "personal"}, {Method: "Remove", Nick: "personal"}}
+	if got := fake.Calls(); !slices.Equal(got, want) {
+		t.Fatalf("WA calls = %+v, want %+v", got, want)
 	}
 }
 
 func TestManageAccountsRejectsUnknownAction(t *testing.T) {
-	res, _ := call(t, connect(t, wa.NewManager()), map[string]any{"action": "purge"})
+	res, _ := call(t, connect(t, &toolstest.WA{}), map[string]any{"action": "purge"})
 	if !res.IsError {
 		t.Fatal("unknown action accepted")
 	}

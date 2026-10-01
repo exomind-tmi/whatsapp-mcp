@@ -30,7 +30,10 @@ type manageIn struct {
 	Phone     string `json:"phone,omitempty" jsonschema:"add only: phone number of the account in international format; returns a pairing code instead of a QR page"`
 }
 
-type accountOut struct {
+// AccountOut is one account in the manage-accounts output. Exported, like
+// ManageOut, for clients that decode it (status); the golden tools/list pins
+// the schema.
+type AccountOut struct {
 	AccountID string `json:"account_id"`
 	Status    string `json:"status"`
 	Reason    string `json:"reason,omitempty"`
@@ -41,8 +44,9 @@ type accountOut struct {
 	Messages  int    `json:"messages"`
 }
 
-type manageOut struct {
-	Accounts  []accountOut `json:"accounts,omitzero"` // list returns [] rather than nothing
+// ManageOut is the manage-accounts output; each action fills its own fields.
+type ManageOut struct {
+	Accounts  []AccountOut `json:"accounts,omitzero"` // list returns [] rather than nothing
 	Status    string       `json:"status,omitempty"`
 	LoginURL  string       `json:"login_url,omitempty"`
 	PairCode  string       `json:"pair_code,omitempty"`
@@ -51,20 +55,20 @@ type manageOut struct {
 	NextStep  string       `json:"next_step,omitempty"`
 }
 
-func (d Deps) manageAccounts(ctx context.Context, _ *mcp.CallToolRequest, in manageIn) (*mcp.CallToolResult, manageOut, error) {
+func (d Deps) manageAccounts(ctx context.Context, _ *mcp.CallToolRequest, in manageIn) (*mcp.CallToolResult, ManageOut, error) {
 	if in.Action == "list" {
 		return nil, d.listAccounts(ctx), nil
 	}
 	if !wa.ValidNick(in.AccountID) {
-		return nil, manageOut{}, fmt.Errorf("account_id %q is invalid: use 1-64 lowercase latin letters, digits, _ or -", in.AccountID)
+		return nil, ManageOut{}, fmt.Errorf("account_id %q is invalid: use 1-64 lowercase latin letters, digits, _ or -", in.AccountID)
 	}
 	switch in.Action {
 	case "add":
 		t, err := d.WA.Link(ctx, in.AccountID, in.Phone)
 		if err != nil {
-			return nil, manageOut{}, err
+			return nil, ManageOut{}, err
 		}
-		out := manageOut{Status: string(wa.StatusLinking), LoginURL: t.LoginURL, PairCode: t.PairCode, ExpiresAt: isoTime(t.ExpiresAt)}
+		out := ManageOut{Status: string(wa.StatusLinking), LoginURL: t.LoginURL, PairCode: t.PairCode, ExpiresAt: isoTime(t.ExpiresAt)}
 		if t.PairCode != "" {
 			out.NextStep = "WhatsApp on the phone → Linked devices → Link with phone number, enter the code"
 		} else {
@@ -74,18 +78,20 @@ func (d Deps) manageAccounts(ctx context.Context, _ *mcp.CallToolRequest, in man
 	case "remove":
 		r, err := d.WA.Remove(ctx, in.AccountID)
 		if err != nil {
-			return nil, manageOut{}, err
+			return nil, ManageOut{}, err
 		}
-		return nil, manageOut{Status: "removed", Hint: r.Hint}, nil
+		// Not a wa.Status: a removed account no longer exists, so no account
+		// is ever in this state; it only reports what the call did.
+		return nil, ManageOut{Status: "removed", Hint: r.Hint}, nil
 	}
-	return nil, manageOut{}, fmt.Errorf("unknown action %q: use list, add or remove", in.Action)
+	return nil, ManageOut{}, fmt.Errorf("unknown action %q: use list, add or remove", in.Action)
 }
 
-func (d Deps) listAccounts(ctx context.Context) manageOut {
+func (d Deps) listAccounts(ctx context.Context) ManageOut {
 	accs := d.WA.Accounts(ctx)
-	out := manageOut{Accounts: make([]accountOut, 0, len(accs))}
+	out := ManageOut{Accounts: make([]AccountOut, 0, len(accs))}
 	for _, a := range accs {
-		out.Accounts = append(out.Accounts, accountOut{
+		out.Accounts = append(out.Accounts, AccountOut{
 			AccountID: a.Nick,
 			Status:    string(a.Status),
 			Reason:    a.Reason,

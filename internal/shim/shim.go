@@ -5,14 +5,12 @@ package shim
 
 import (
 	"context"
-	"errors"
 	"runtime/debug"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/tools"
-	"github.com/exomind-tmi/whatsapp-mcp/internal/wa"
 )
 
 // Run serves MCP on t until the client disconnects (EOF on stdin).
@@ -28,7 +26,7 @@ func Run(ctx context.Context, h home.Home, version string, t mcp.Transport) erro
 	log.Info("shim started", "version", version)
 
 	f := newForwarder(h, version, log)
-	s := tools.NewServer(version, tools.Deps{WA: stubWA{}})
+	s := tools.NewServer(version, tools.Deps{WA: tools.HandledByDaemon{}})
 	s.AddReceivingMiddleware(f.intercept)
 
 	// Warm up: start or hand over the daemon while the client initializes.
@@ -44,17 +42,4 @@ func Run(ctx context.Context, h home.Home, version string, t mcp.Transport) erro
 	f.close()
 	log.Info("shim stopped", "err", err)
 	return err
-}
-
-// stubWA must never be reached: intercept forwards every tools/call.
-type stubWA struct{}
-
-var errHandledByDaemon = errors.New("internal error: tool calls are handled by the daemon")
-
-func (stubWA) Accounts(context.Context) []wa.AccountInfo { return nil }
-func (stubWA) Link(context.Context, string, string) (wa.LinkTicket, error) {
-	return wa.LinkTicket{}, errHandledByDaemon
-}
-func (stubWA) Remove(context.Context, string) (wa.RemoveResult, error) {
-	return wa.RemoveResult{}, errHandledByDaemon
 }

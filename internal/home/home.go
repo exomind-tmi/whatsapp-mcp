@@ -52,6 +52,7 @@ func (h Home) LockFile() string   { return filepath.Join(h.Dir, "daemon.lock") }
 func (h Home) DaemonJSON() string { return filepath.Join(h.Dir, "daemon.json") }
 func (h Home) TokenFile() string  { return filepath.Join(h.Dir, "token") }
 func (h Home) ArchiveDB() string  { return filepath.Join(h.Dir, "archive.db") }
+func (h Home) StoreDB() string    { return filepath.Join(h.Dir, "store.db") } // whatsmeow's device keys
 func (h Home) BinDir() string     { return filepath.Join(h.Dir, "bin") }
 func (h Home) LogsDir() string    { return filepath.Join(h.Dir, "logs") }
 func (h Home) Log(name string) string {

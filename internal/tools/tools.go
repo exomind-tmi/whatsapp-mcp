@@ -5,6 +5,8 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -29,7 +31,7 @@ A message with revoked: true was deleted by its sender for everyone: do not quot
 If a tool reports that the plugin was updated, ask the user to restart the session.`
 
 // WA is what the tools need from the WhatsApp side. The daemon passes the
-// real manager; the shim passes a stub because it forwards every call.
+// real manager; the shim passes HandledByDaemon because it forwards every call.
 type WA interface {
 	Accounts(ctx context.Context) []wa.AccountInfo
 	Link(ctx context.Context, nick, phone string) (wa.LinkTicket, error)
@@ -38,6 +40,23 @@ type WA interface {
 
 type Deps struct {
 	WA WA
+}
+
+// HandledByDaemon is the shim's WA. It must never be reached, since the shim
+// forwards every tools/call; it lives next to WA so that a new method is
+// added to it in the same change, and fails instead of a nil-pointer panic.
+type HandledByDaemon struct{}
+
+var _ WA = HandledByDaemon{} // a method added to WA breaks the build right here
+
+var errHandledByDaemon = errors.New("internal error: tool calls are handled by the daemon")
+
+func (HandledByDaemon) Accounts(context.Context) []wa.AccountInfo { return nil }
+func (HandledByDaemon) Link(context.Context, string, string) (wa.LinkTicket, error) {
+	return wa.LinkTicket{}, errHandledByDaemon
+}
+func (HandledByDaemon) Remove(context.Context, string) (wa.RemoveResult, error) {
+	return wa.RemoveResult{}, errHandledByDaemon
 }
 
 // NewServer builds the MCP server with instructions and all tools.
@@ -108,4 +127,16 @@ func schemaFor[In any](enums map[string][]any) *jsonschema.Schema {
 		s.Properties[prop].Enum = values
 	}
 	return s
+}
+
+// ResultText joins the text content of a tool result: the message of an
+// error result, or the JSON copy of structured content.
+func ResultText(res *mcp.CallToolResult) string {
+	var sb strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			sb.WriteString(tc.Text)
+		}
+	}
+	return sb.String()
 }

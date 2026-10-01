@@ -16,7 +16,7 @@ import (
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/testutil"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/tools"
-	"github.com/exomind-tmi/whatsapp-mcp/internal/wa"
+	"github.com/exomind-tmi/whatsapp-mcp/internal/tools/toolstest"
 )
 
 func TestEnsureTokenCreatesOnce(t *testing.T) {
@@ -44,8 +44,13 @@ func TestEnsureTokenKeepsExisting(t *testing.T) {
 
 func TestMuxAuth(t *testing.T) {
 	stop := make(chan struct{})
-	srv := httptest.NewServer(newMux("v1.2.3", "secret", tools.NewServer("v1.2.3", tools.Deps{WA: wa.NewManager()}), stop,
-		slog.New(slog.DiscardHandler)))
+	srv := httptest.NewServer(newMux(muxDeps{
+		version: "v1.2.3",
+		token:   "secret",
+		server:  tools.NewServer("v1.2.3", tools.Deps{WA: &toolstest.WA{}}),
+		stop:    stop,
+		log:     slog.New(slog.DiscardHandler),
+	}))
 	defer srv.Close()
 
 	do := func(method, path, auth string) (int, string) {

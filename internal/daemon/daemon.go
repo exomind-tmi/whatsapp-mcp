@@ -80,22 +80,33 @@ func run(ctx context.Context, h home.Home, version string, log *slog.Logger) err
 		return err
 	}
 	defer db.Close()
-	accounts := wa.NewManager()
-	defer accounts.Close()
 
+	// Listen before building the Manager: the login pages it hands out (M1)
+	// live on this port. Serve closes ln; the defer covers a failure before.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
 	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	accounts := wa.NewManager()
+	defer accounts.Close() // after srv.Shutdown below, before db.Close (plan 4.4)
+
 	stop := make(chan struct{})
 	srv := &http.Server{
-		Handler:           newMux(version, token, tools.NewServer(version, tools.Deps{WA: accounts}), stop, log),
+		Handler: newMux(muxDeps{
+			version: version,
+			token:   token,
+			server:  tools.NewServer(version, tools.Deps{WA: accounts}),
+			stop:    stop,
+			log:     log,
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 
-	port := ln.Addr().(*net.TCPAddr).Port
 	if err := h.WriteDaemonInfo(home.DaemonInfo{PID: os.Getpid(), Port: port, Version: version, StartedAt: time.Now()}); err != nil {
 		srv.Close()
 		return fmt.Errorf("write daemon.json: %w", err)

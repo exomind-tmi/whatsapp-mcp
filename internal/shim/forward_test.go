@@ -22,24 +22,8 @@ import (
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/testutil"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/tools"
-	"github.com/exomind-tmi/whatsapp-mcp/internal/wa"
+	"github.com/exomind-tmi/whatsapp-mcp/internal/tools/toolstest"
 )
-
-// failingWA fails the test if the shim ever runs a tool locally.
-type failingWA struct{ t *testing.T }
-
-func (f failingWA) Accounts(context.Context) []wa.AccountInfo {
-	f.t.Error("shim stub reached: Accounts")
-	return nil
-}
-func (f failingWA) Link(context.Context, string, string) (wa.LinkTicket, error) {
-	f.t.Error("shim stub reached: Link")
-	return wa.LinkTicket{}, nil
-}
-func (f failingWA) Remove(context.Context, string) (wa.RemoveResult, error) {
-	f.t.Error("shim stub reached: Remove")
-	return wa.RemoveResult{}, nil
-}
 
 // startDaemon runs the real daemon in-process on a temp home.
 func startDaemon(t *testing.T, version string) home.Home {
@@ -62,12 +46,19 @@ func startDaemon(t *testing.T, version string) home.Home {
 	}
 }
 
-// shimSession connects a client to a shim server whose own tools would fail.
+// shimSession connects a client to a shim server. Its own WA fails the test
+// if the shim ever runs a tool locally instead of forwarding it.
 func shimSession(t *testing.T, h home.Home, version string) *mcp.ClientSession {
 	t.Helper()
 	f := newForwarder(h, version, slog.New(slog.DiscardHandler))
 	t.Cleanup(f.close)
-	s := tools.NewServer(version, tools.Deps{WA: failingWA{t}})
+	local := &toolstest.WA{}
+	t.Cleanup(func() {
+		if calls := local.Calls(); len(calls) != 0 {
+			t.Errorf("shim ran tools locally: %v", calls)
+		}
+	})
+	s := tools.NewServer(version, tools.Deps{WA: local})
 	s.AddReceivingMiddleware(f.intercept)
 	st, ct := mcp.NewInMemoryTransports()
 	ctx := context.Background()
@@ -88,13 +79,7 @@ func callText(t *testing.T, cs *mcp.ClientSession, name string, args map[string]
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sb strings.Builder
-	for _, c := range res.Content {
-		if tc, ok := c.(*mcp.TextContent); ok {
-			sb.WriteString(tc.Text)
-		}
-	}
-	return res, sb.String()
+	return res, tools.ResultText(res)
 }
 
 func TestShimForwardsToDaemon(t *testing.T) {
@@ -115,9 +100,11 @@ func TestShimForwardsToDaemon(t *testing.T) {
 		t.Error("structuredContent lost in forwarding")
 	}
 
-	res, text = callText(t, cs, "manage-accounts", map[string]any{"action": "add", "account_id": "personal"})
-	if !res.IsError || !strings.Contains(text, "not implemented until M1") {
-		t.Fatalf("isError lost in forwarding: %v %s", res.IsError, text)
+	for _, action := range []string{"add", "remove"} {
+		res, text = callText(t, cs, "manage-accounts", map[string]any{"action": action, "account_id": "personal"})
+		if !res.IsError || !strings.Contains(text, "not implemented until M1") {
+			t.Fatalf("%s: isError lost in forwarding: %v %s", action, res.IsError, text)
+		}
 	}
 }
 
@@ -129,7 +116,7 @@ func TestShimForwardsEveryListedTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tool := range list.Tools {
-		// failingWA fails the test if any call is handled by the shim itself.
+		// shimSession fails the test if any call is handled by the shim itself.
 		for _, action := range []string{"list", "add", "remove"} {
 			cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool.Name,
 				Arguments: map[string]any{"action": action, "account_id": "personal"}})
@@ -145,7 +132,7 @@ func TestShimReportsOutdatedToolList(t *testing.T) {
 	// A tool this shim knows but the (newer) daemon no longer has.
 	f.known = func(string) bool { return true }
 	res, err := f.call(context.Background(), &mcp.CallToolParamsRaw{Name: "tool-the-daemon-dropped"})
-	if err != nil || !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "restart the session") {
+	if err != nil || !res.IsError || !strings.Contains(tools.ResultText(res), "restart the session") {
 		t.Fatalf("dropped tool: %v %+v", err, res)
 	}
 	// A name nobody knows gets the daemon's usual error.
@@ -167,7 +154,7 @@ func fakeDaemon(t *testing.T, version string, breaks int32) (home.Home, *atomic.
 	const token = "test-token"
 	os.WriteFile(h.TokenFile(), []byte(token), 0o600)
 
-	server := tools.NewServer(version, tools.Deps{WA: wa.NewManager()})
+	server := tools.NewServer(version, tools.Deps{WA: &toolstest.WA{}})
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	var calls atomic.Int32
@@ -215,7 +202,7 @@ func TestTransportErrorRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			text := res.Content[0].(*mcp.TextContent).Text
+			text := tools.ResultText(res)
 			if res.IsError == tc.wantOK || (!tc.wantOK && !strings.HasPrefix(text, msgUnconfirmed)) {
 				t.Errorf("isError=%v %s", res.IsError, text)
 			}
