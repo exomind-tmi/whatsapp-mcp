@@ -51,7 +51,7 @@ claude plugin install whatsapp@exomind
 
 ## Security model
 
-- Everything runs on your device. Messages travel directly between your device and WhatsApp.
+- The daemon runs on your device and talks only to WhatsApp.
 - The daemon listens on `127.0.0.1` only, on a random port. Every MCP request needs a
   bearer token that the daemon creates in its state directory; requests with a foreign
   `Host` header are rejected.
@@ -94,4 +94,4 @@ All third-party components and their licenses are listed in
 
 ## License
 
-[GPL-3.0](LICENSE) © 2026 Exomind Tmi
+[GPL-3.0-only](LICENSE) © 2026 Exomind Tmi
