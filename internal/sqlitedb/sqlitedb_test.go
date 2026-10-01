@@ -51,10 +51,11 @@ func TestPragmas(t *testing.T) {
 	}
 	defer db.Close()
 	for pragma, want := range map[string]string{
-		"journal_mode":  "wal",
-		"busy_timeout":  "10000",
-		"synchronous":   "1", // NORMAL
-		"secure_delete": "1",
+		"journal_mode":       "wal",
+		"busy_timeout":       "10000",
+		"synchronous":        "1", // NORMAL
+		"secure_delete":      "1",
+		"journal_size_limit": "16777216",
 	} {
 		var got string
 		if err := db.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil || got != want {

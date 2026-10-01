@@ -23,7 +23,12 @@ import (
 // device keys are gone from this computer, not merely unlinked from the
 // b-tree and still readable in the file. The -wal file keeps its copies
 // until a checkpoint, so a remove ends with one on each database.
-const Pragmas = "_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=secure_delete(1)&_txlock=immediate"
+// journal_size_limit cuts the -wal file back to 16 MiB when it is next
+// reused: the automatic checkpoints never shrink it, so a WAL that a VACUUM
+// blew up to the size of the database while a reader held off the remove's
+// TRUNCATE checkpoint would otherwise stay that size for good. The limit sits
+// above the ~4 MiB an automatic checkpoint (1000 pages) lets it grow to.
+const Pragmas = "_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=secure_delete(1)&_pragma=journal_size_limit(16777216)&_txlock=immediate"
 
 // Open opens the database at path; query holds the driver's DSN parameters.
 func Open(path, query string) (*sql.DB, error) {

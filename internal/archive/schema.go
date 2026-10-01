@@ -21,17 +21,22 @@ const SchemaVersion = len(migrations)
 // leave the text as it was (the upsert of plan 8 sets text even onto a
 // placeholder an edit already filled), which would only pile up FTS
 // tombstones.
+//
+// messages is never written with INSERT OR REPLACE or REPLACE, only with
+// upserts (INSERT ... ON CONFLICT DO UPDATE): the row a REPLACE deletes does
+// not fire messages_ad (recursive_triggers is off), so its text would stay
+// in messages_fts as an orphan.
 const schemaV1 = `
 CREATE TABLE accounts (
   nick       TEXT PRIMARY KEY,         -- ^[a-z0-9_-]{1,64}$, checked in Go
-  jid        TEXT,                     -- full AD-JID of the device in store.db; NULL until first linked
+  jid        TEXT UNIQUE,              -- full AD-JID of the device in store.db; NULL (any number of them) until first linked
   created_at INTEGER NOT NULL          -- unix seconds
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE chats (
   account  TEXT NOT NULL REFERENCES accounts(nick) ON DELETE CASCADE,
   jid      TEXT NOT NULL,              -- canonical: the LID for a direct chat when known
-  pn       TEXT,                       -- phone number, for display and search
+  pn       TEXT,                       -- PN-JID as wa.CanonicalChat makes it (digits@s.whatsapp.net), for display and search
   name     TEXT,
   is_group INTEGER NOT NULL DEFAULT 0,
   last_message_ts INTEGER,
@@ -78,9 +83,11 @@ END;
 CREATE TABLE history_queue (
   id         INTEGER PRIMARY KEY,
   account    TEXT NOT NULL REFERENCES accounts(nick) ON DELETE CASCADE,
+  msg_id     TEXT NOT NULL,            -- the message that carried the notification
   notif      BLOB NOT NULL,            -- proto.Marshal(HistorySyncNotification)
   attempts   INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
-  created_at INTEGER NOT NULL          -- unix seconds
+  created_at INTEGER NOT NULL,         -- unix seconds
+  UNIQUE (account, msg_id)             -- a notification redelivered after a crash is queued once; also indexes the foreign key
 ) STRICT;
 `

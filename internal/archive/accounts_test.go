@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,6 +131,29 @@ func TestSetAccountJIDRejectsEmpty(t *testing.T) {
 	}
 }
 
+// TestSetAccountJIDTaken: one device, one nick. The error names the holder,
+// and neither account changes.
+func TestSetAccountJIDTaken(t *testing.T) {
+	ctx := context.Background()
+	db := openTemp(t)
+	for _, nick := range []string{"alice", "bob"} {
+		if err := db.AddAccount(ctx, nick); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.SetAccountJID(ctx, "bob", jid1); err != nil {
+		t.Fatal(err)
+	}
+
+	err := db.SetAccountJID(ctx, "alice", jid1)
+	if !errors.Is(err, ErrJIDTaken) || !strings.Contains(err.Error(), "bob") {
+		t.Fatalf("err = %v, want ErrJIDTaken naming bob", err)
+	}
+	if got, want := nickJIDs(t, db), []nickJID{{"alice", ""}, {"bob", jid1}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("accounts = %v, want %v", got, want)
+	}
+}
+
 func TestAddAccountTimestamps(t *testing.T) {
 	ctx := context.Background()
 	db := openTemp(t)
@@ -174,7 +198,7 @@ func seed(t *testing.T, db *DB, nick string) {
 		   (?1, 'c1@s.whatsapp.net', 'm1', 'c1@s.whatsapp.net', 0, 1, 'hello from ' || ?1),
 		   (?1, 'c1@s.whatsapp.net', 'm2', 'me@s.whatsapp.net', 1, 2, 'hello again ' || ?1),
 		   (?1, 'c2@g.us', 'm3', 'c1@s.whatsapp.net', 0, 3, NULL)`,
-		`INSERT INTO history_queue(account, notif, created_at) VALUES (?1, x'00', 1)`,
+		`INSERT INTO history_queue(account, msg_id, notif, created_at) VALUES (?1, 'h1', x'00', 1)`,
 	} {
 		if _, err := db.w.Exec(q, nick); err != nil {
 			t.Fatalf("seed %s: %v", nick, err)
@@ -283,6 +307,100 @@ func TestDeleteAccountLeavesNoTrace(t *testing.T) {
 	}
 	if inFiles(t, p, marker) {
 		t.Fatal("the deleted text is still in archive.db or its WAL")
+	}
+}
+
+// TestDeleteAccountShrinksFile: VACUUM gives the freed pages back to the file
+// system, and what it rebuilds keeps the other account whole, including the
+// FTS rows, which are tied to messages by rowid.
+func TestDeleteAccountShrinksFile(t *testing.T) {
+	p := filepath.Join(testutil.TempDir(t), "archive.db")
+	db := openAt(t, p)
+	seed(t, db, "alice")
+	seed(t, db, "bob")
+	if _, err := db.w.Exec(`
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000)
+INSERT INTO messages(account, chat_jid, msg_id, sender_jid, from_me, ts, text, raw)
+SELECT 'alice', 'c1@s.whatsapp.net', 'b' || i, 'c1@s.whatsapp.net', 0, 10 + i,
+       'filler ' || hex(randomblob(100)), randomblob(300) FROM n`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.w.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	before := fileSize(t, p)
+
+	if err := db.DeleteAccount(context.Background(), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if after := fileSize(t, p); after*2 > before {
+		t.Errorf("archive.db is %d bytes after the delete, %d before: not shrunk", after, before)
+	}
+	if n := count(t, db, `PRAGMA freelist_count`); n != 0 {
+		t.Errorf("%d free pages left: VACUUM did not run", n)
+	}
+	for q, want := range map[string]int{
+		`SELECT count(*) FROM chats WHERE account = 'bob'`:         2,
+		`SELECT count(*) FROM messages WHERE account = 'bob'`:      3,
+		`SELECT count(*) FROM history_queue WHERE account = 'bob'`: 1,
+		`SELECT count(*) FROM messages_fts f JOIN messages m ON m.id = f.rowid
+		   WHERE messages_fts MATCH 'bob' AND m.account = 'bob'`: 2,
+	} {
+		if got := count(t, db, q); got != want {
+			t.Errorf("%s = %d, want %d", q, got, want)
+		}
+	}
+}
+
+func fileSize(t *testing.T, p string) int64 {
+	t.Helper()
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Size()
+}
+
+// TestHistoryQueueKeyedByMessage: a notification redelivered after a crash
+// (plan 7.2) is queued once per account, and the key also serves the
+// foreign key, so the cascade of DeleteAccount does not scan the queue.
+func TestHistoryQueueKeyedByMessage(t *testing.T) {
+	db := openTemp(t)
+	seed(t, db, "alice") // both queue h1: the key is per account
+	seed(t, db, "bob")
+	const push = `INSERT INTO history_queue(account, msg_id, notif, created_at) VALUES ('alice', 'h1', x'01', 2)`
+	if _, err := db.w.Exec(push + ` ON CONFLICT DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.w.Exec(push); err == nil {
+		t.Error("a second h1 of alice was queued")
+	}
+	if n := count(t, db, `SELECT count(*) FROM history_queue WHERE account = 'alice'`); n != 1 {
+		t.Errorf("alice has %d queued notifications, want 1", n)
+	}
+	if n := count(t, db, `SELECT count(*) FROM history_queue`); n != 2 {
+		t.Errorf("%d queued notifications in all, want 2", n)
+	}
+
+	rows, err := db.w.Query(`EXPLAIN QUERY PLAN SELECT id FROM history_queue WHERE account = 'alice'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(plan, "; "), "SEARCH history_queue USING") {
+		t.Errorf("lookup by account: %q, want an index search", plan)
 	}
 }
 

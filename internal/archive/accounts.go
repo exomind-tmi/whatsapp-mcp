@@ -8,8 +8,13 @@ import (
 	"time"
 )
 
-// ErrNoAccount means there is no account with that nick.
-var ErrNoAccount = errors.New("no such account")
+var (
+	// ErrNoAccount means there is no account with that nick.
+	ErrNoAccount = errors.New("no such account")
+	// ErrJIDTaken means the device is already linked to another nick; the
+	// error names that nick.
+	ErrJIDTaken = errors.New("device already linked to another account")
+)
 
 // Account is a row of accounts with the size of its archive. The nick is
 // validated by the caller (wa.ValidNick): archive sits below wa and must not
@@ -68,22 +73,42 @@ func (db *DB) AddAccount(ctx context.Context, nick string) error {
 // replaces it. jid is the full AD-JID (with the device number), which
 // store.db's GetDevice needs. An empty one is refused: "not linked" is NULL
 // alone, so the orphan cleanup of plan 6.1 has one state to compare against.
+// accounts.jid is UNIQUE: a device that another nick holds is ErrJIDTaken.
 func (db *DB) SetAccountJID(ctx context.Context, nick, jid string) error {
+	const op = "set jid of account"
 	if jid == "" {
-		return fmt.Errorf("set jid of account %q: empty jid", nick)
+		return fmt.Errorf("%s %q: empty jid", op, nick)
 	}
-	return db.execAccount(ctx, "set jid of account", nick, `UPDATE accounts SET jid = ? WHERE nick = ?`, jid, nick)
+	err := db.execAccount(ctx, op, nick, `UPDATE accounts SET jid = ? WHERE nick = ?`, jid, nick)
+	if err == nil || errors.Is(err, ErrNoAccount) {
+		return err
+	}
+	// Asking who holds the jid is simpler than decoding the driver's
+	// constraint error, and the error can then name the nick.
+	var holder string
+	if db.w.QueryRowContext(ctx, `SELECT nick FROM accounts WHERE jid = ? AND nick <> ?`, jid, nick).Scan(&holder) == nil {
+		return fmt.Errorf("%s %q: %w: %s", op, nick, ErrJIDTaken, holder)
+	}
+	return err
 }
 
 // DeleteAccount forgets the account and, by ON DELETE CASCADE, its whole
 // archive: chats, messages with their full-text index, the history queue.
-// secure_delete has zeroed the freed pages; the checkpoint also empties the
-// WAL, which still holds the rows as they were written. It is best effort:
-// the delete is committed, and SQLite checkpoints on its own soon anyway.
+// secure_delete has zeroed the freed pages; VACUUM gives them back to the
+// file system (simpler than auto_vacuum, and a remove is rare), and the
+// checkpoint moves its result into archive.db and empties the WAL, which
+// still holds the rows as they were written. Both are best effort: the
+// delete is committed. A reader that holds off the checkpoint leaves the
+// VACUUM's copy of the database in the WAL; the automatic checkpoints move it
+// later, and journal_size_limit (sqlitedb.Pragmas) cuts the file back.
+// VACUUM cannot run inside a transaction, so it goes straight to the writer;
+// while it runs, writes of the other accounts wait, and at its peak it needs
+// about twice the database in extra disk space: its temp copy plus the WAL.
 func (db *DB) DeleteAccount(ctx context.Context, nick string) error {
 	if err := db.execAccount(ctx, "delete account", nick, `DELETE FROM accounts WHERE nick = ?`, nick); err != nil {
 		return err
 	}
+	_, _ = db.w.ExecContext(ctx, "VACUUM")
 	_, _ = db.w.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
 	return nil
 }
