@@ -63,13 +63,19 @@ func ValidPhone(s string) bool {
 	if !phoneRe.MatchString(s) {
 		return false
 	}
-	d := strings.Map(func(r rune) rune {
+	d := phoneDigits(s)
+	return len(d) > 6 && len(d) <= 15 && d[0] != '0'
+}
+
+// phoneDigits is s without its non-digits: the number as WhatsApp's JIDs
+// have it, and as PairPhone reads it.
+func phoneDigits(s string) string {
+	return strings.Map(func(r rune) rune {
 		if r >= '0' && r <= '9' {
 			return r
 		}
 		return -1
 	}, s)
-	return len(d) > 6 && len(d) <= 15 && d[0] != '0'
 }
 
 // ErrNotImplemented is returned by operations that arrive in a later step.

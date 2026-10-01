@@ -43,10 +43,22 @@ func noNonces(m *Manager) bool {
 	return len(m.nonces.byNick) == 0
 }
 
+// sessOf is nick's latest pairing; nil while there is none, or no account.
 func sessOf(m *Manager, nick string) *pairSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.accounts[nick].sess
+	if a := m.accounts[nick]; a != nil {
+		return a.sess
+	}
+	return nil
+}
+
+// awaitSession waits for nick's pairing to be started, which a call of add that
+// is under way does without a sign for the test.
+func awaitSession(t *testing.T, m *Manager, nick string) *pairSession {
+	t.Helper()
+	eventually(t, "the pairing of "+nick, func() bool { return sessOf(m, nick) != nil })
+	return sessOf(m, nick)
 }
 
 func qrCount(fn *fakeNet) int {
@@ -72,43 +84,55 @@ func linkFixture(t *testing.T) (*Manager, *fakeNet, *fixture) {
 	return m, fn, f
 }
 
-// TestLinkOutcomes: Link applies the add policy of plan 6.4 to each status
-// and starts no pairing: a link, a reconnect or a refusal comes out.
-func TestLinkOutcomes(t *testing.T) {
-	const (
-		link      = "link"
-		reconnect = "reconnect"
-		refuse    = "refuse"
-	)
+// What the add policy does with an account, as Link shows it.
+const (
+	wantLink      = "link"      // a login link, or with a phone number a pairing code
+	wantReconnect = "reconnect" // the account's device connects again
+	wantRefuse    = "refuse"
+)
+
+// linkCase is an account of linkFixture ("personal") in a state, and what add
+// does with it.
+type linkCase struct {
+	name   string
+	prep   func(t *testing.T, m *Manager)
+	want   string
+	reason string // a part of the refusal
+}
+
+// linkCases is plan 6.4, a case for each status.
+func linkCases() []linkCase {
 	banned := func(t *testing.T, m *Manager) {
 		m.accounts["personal"].cli.DangerousInternals().DispatchEvent(&events.TemporaryBan{Code: events.TempBanSentToTooManyPeople, Expire: time.Hour})
 	}
-	for _, tc := range []struct {
-		name   string
-		prep   func(t *testing.T, m *Manager)
-		want   string
-		reason string // a part of the refusal
-	}{
-		{"needs_link", func(t *testing.T, m *Manager) { forceStatus(m, "personal", StatusNeedsLink) }, link, ""},
-		{"connected", func(t *testing.T, m *Manager) { forceStatus(m, "personal", StatusConnected) }, refuse, "already linked and connected"},
-		{"reconnecting", func(*testing.T, *Manager) {}, refuse, "reconnects by itself"},
-		{"replaced", func(t *testing.T, m *Manager) { forceStatus(m, "personal", StatusReplaced) }, reconnect, ""},
-		{"error", func(t *testing.T, m *Manager) { forceStatus(m, "personal", StatusError) }, reconnect, ""},
-		{"banned", banned, refuse, "banned by WhatsApp"},
+	return []linkCase{
+		{"needs_link", func(t *testing.T, m *Manager) { forceStatus(m, "personal", StatusNeedsLink) }, wantLink, ""},
+		{"connected", func(t *testing.T, m *Manager) { forceStatus(m, "personal", StatusConnected) }, wantRefuse, "already linked and connected"},
+		{"reconnecting", func(*testing.T, *Manager) {}, wantRefuse, "reconnects by itself"},
+		{"replaced", func(t *testing.T, m *Manager) { forceStatus(m, "personal", StatusReplaced) }, wantReconnect, ""},
+		{"error", func(t *testing.T, m *Manager) { forceStatus(m, "personal", StatusError) }, wantReconnect, ""},
+		{"banned", banned, wantRefuse, "banned by WhatsApp"},
 		{"ban over", func(t *testing.T, m *Manager) {
 			banned(t, m)
 			m.mu.Lock()
 			m.accounts["personal"].info.ExpiresAt = time.Now().Add(-time.Second)
 			m.mu.Unlock()
-		}, reconnect, ""},
-		{"client_outdated", func(t *testing.T, m *Manager) { forceStatus(m, "personal", StatusClientOutdated) }, refuse, "update whatsapp-mcp"},
+		}, wantReconnect, ""},
+		{"client_outdated", func(t *testing.T, m *Manager) { forceStatus(m, "personal", StatusClientOutdated) }, wantRefuse, "update whatsapp-mcp"},
 		{"no device", func(t *testing.T, m *Manager) {
 			m.mu.Lock()
 			m.accounts["personal"].cli = nil
 			m.accounts["personal"].info.Status = StatusError
 			m.mu.Unlock()
-		}, link, ""},
-	} {
+		}, wantLink, ""},
+	}
+}
+
+// TestLinkOutcomes: Link applies the add policy of plan 6.4 to each status
+// and starts no pairing: a link, a reconnect or a refusal comes out.
+func TestLinkOutcomes(t *testing.T) {
+	const link, reconnect, refuse = wantLink, wantReconnect, wantRefuse
+	for _, tc := range linkCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			m, fn, _ := linkFixture(t)
 			tc.prep(t, m)
@@ -190,8 +214,12 @@ func TestLinkRefusesWhatItCannotDo(t *testing.T) {
 			t.Errorf("Link(%q) accepted the nick", nick)
 		}
 	}
-	if _, err := m.Link(ctx, "fresh", "+7 999 000 00 01"); !errors.Is(err, errPhoneNotImplemented) {
-		t.Errorf("Link with a phone: %v, want the not implemented error", err)
+	for _, phone := range []string{"abc", "123456", "+0 999 000 00 01", "+7 999 000 00 01 02 03 04", "7999;000", "+7 (999) 000-00-x"} {
+		// Bounded: a number that got through would start a pairing and wait for it.
+		err := result(t, linkAsync(m, "fresh", phone)).err
+		if err == nil || !strings.Contains(err.Error(), "invalid phone number") || strings.Contains(err.Error(), phone) {
+			t.Errorf("Link with the phone %q: %v, want a refusal that does not repeat it", phone, err)
+		}
 	}
 	if accs, _ := f.db.Accounts(ctx); len(accs) != 0 || !noNonces(m) || len(fn.called(true)) != 0 {
 		t.Errorf("a refused Link left something behind: %v, %v", accs, fn.called(true))

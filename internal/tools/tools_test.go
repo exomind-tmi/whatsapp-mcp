@@ -244,8 +244,10 @@ func TestManageAccountsAddRemoveOutput(t *testing.T) {
 		{"add code", &toolstest.WA{Ticket: wa.LinkTicket{PairCode: "ABCD-EFGH", ExpiresAt: expires}},
 			map[string]any{"action": "add", "account_id": "personal", "phone": "+70000000000"},
 			toolstest.Call{Method: "Link", Nick: "personal", Phone: "+70000000000"},
-			`{"next_step":"WhatsApp on the phone → Linked devices → Link with phone number, enter the code","pair_code":"ABCD-EFGH","expires_at":"` +
-				expires.Local().Format(time.RFC3339) + `","status":"linking"}`},
+			`{"next_step":"WhatsApp on the phone → Linked devices → Link a device → Link with phone number instead, ` +
+				"enter the code before expires_at; then check manage-accounts action=list: " +
+				"`linking` while it waits, `connected` once linked, `needs_link` with a reason if it failed" +
+				`","pair_code":"ABCD-EFGH","expires_at":"` + expires.Local().Format(time.RFC3339) + `","status":"linking"}`},
 		{"remove", &toolstest.WA{Removed: wa.RemoveResult{Hint: "remove the device on the phone manually"}},
 			map[string]any{"action": "remove", "account_id": "personal"},
 			toolstest.Call{Method: "Remove", Nick: "personal"},

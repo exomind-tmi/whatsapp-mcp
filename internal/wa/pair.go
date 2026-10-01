@@ -31,6 +31,50 @@ const oldDeviceHint = "the old device of this account may still be listed on the
 
 const cancelledReason = "linking was cancelled; call add again"
 
+// differentNumberReason is why a relink with another number is refused.
+const differentNumberReason = "this is a different phone number; remove the account and add it again"
+
+// The timeouts of the QR codes whatsmeow shows: the first one only when the
+// server sent six refs, else every code gets the shorter one
+// (qrchan.go:92-96).
+const (
+	qrFirst = 60 * time.Second
+	qrNext  = 20 * time.Second
+)
+
+// qrWindow is how long a pairing's connection lives from its first code when
+// the server sent six refs: the first code is shown for qrFirst, each of the
+// other five for qrNext, and then the channel closes and the client
+// disconnects (qrchan.go:92-96, 77-83). A pairing code, whose own expiry
+// nobody knows (pair-code.go:83-85), lives inside that window; it is a limit,
+// not a promise, as the code may stop working earlier. whatsmeow can lengthen
+// the window by restarting a code on an ADV secret rotation (qrchan.go:117-124),
+// which has not been seen on the code path.
+const qrWindow = qrFirst + 5*qrNext
+
+// windowFor is how long the connection of a pairing lives from its first QR
+// code, whose timeout is first: qrWindow for the six refs that make it qrFirst,
+// and for fewer refs (pair.go:67-79) only the first code's own timeout is known,
+// so that is what the window is taken to be.
+func windowFor(first time.Duration) time.Duration {
+	if first == qrFirst {
+		return qrWindow
+	}
+	return first
+}
+
+// pairKind is how a pairing is meant to end, which add must know: a pairing
+// that waits for a code typed on the phone is not for a login page to
+// restart. kindNone is not a kind of session, it is admit's request to decide
+// and start nothing, so no session has it.
+type pairKind int
+
+const (
+	kindNone  pairKind = iota // admit only: decide, start no pairing
+	kindPage                  // a QR page shows the codes; the page's first poll starts it
+	kindPhone                 // the user types a pairing code on the phone; add with phone starts it
+)
+
 type pairState string
 
 const (
@@ -50,10 +94,13 @@ type pairStatus struct {
 	Hint    string    // for the user, even on success
 }
 
-// pairSession links a new device to an account by QR code (plan 6.3). It
+// pairSession links a new device to an account by QR code (plan 6.3), shown
+// on a login page or, with kindPhone, replaced by a pairing code that the
+// session's client asks for once the first QR code is out (plan 5.3). It
 // runs on the Manager's ctx, not the request's: a page reload or the next
 // add finds it alive.
 type pairSession struct {
+	kind   pairKind
 	cli    *whatsmeow.Client
 	ch     <-chan whatsmeow.QRChannelItem
 	ctx    context.Context // the QR channel's; ends on stop, Close or the session's end
@@ -66,11 +113,25 @@ type pairSession struct {
 	left  chan struct{}
 	leave func()
 
+	// connecting is closed by readQR once the client globals are final, just
+	// before the connect: what add with a phone number times from is the
+	// connection, not our own start.
+	connecting chan struct{}
+
+	// coded is closed by markCoded when the first QR code is out: the
+	// connection is up, and PairPhone may ask for a code (pair-code.go:78-81).
+	// window is when the QR codes run out, windowFor from the first one: written
+	// before coded is closed, read after, and never again.
+	coded     chan struct{}
+	markCoded func()
+	window    time.Time
+
 	mu        sync.Mutex
 	st        pairStatus
 	refusal   string // why PrePairCallback refused the device
 	bound     bool   // PrePairCallback took a device: from then on only Close cancels
 	cancelled bool   // by stop, before any device was taken
+	why       string // the reason the account is left with when stop gave one
 }
 
 func (s *pairSession) status() pairStatus {
@@ -120,16 +181,34 @@ func (s *pairSession) unbind() {
 // whatsmeow ends the QR channel on a cancel only once a code is out
 // (qrchan.go:125-131), and a Disconnect here would wait out a connect in
 // its noise handshake, which holds the socket lock (client.go:527-528).
-func (s *pairSession) stop() bool {
+func (s *pairSession) stop() bool { return s.stopFor("") }
+
+// stopFor is stop for a pairing that has no use any more, with the reason it
+// leaves the account with; "" for cancelledReason. The first stop's reason
+// stands: a pairing that a newer add has cancelled keeps the account's
+// cancelledReason when the call that was waiting on it comes to give up too.
+func (s *pairSession) stopFor(reason string) bool {
 	s.mu.Lock()
 	if s.bound {
 		s.mu.Unlock()
 		return false
 	}
-	s.cancelled = true
+	if !s.cancelled {
+		s.cancelled, s.why = true, reason
+	}
 	s.mu.Unlock()
 	s.cancel()
 	return true
+}
+
+// cancelReason is why a cancelled session ended.
+func (s *pairSession) cancelReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.why != "" {
+		return s.why
+	}
+	return cancelledReason
 }
 
 // drop discards a session built but never started; nil is fine.
@@ -137,6 +216,13 @@ func (s *pairSession) drop() {
 	if s != nil {
 		s.cancel()
 	}
+}
+
+// over tells whether s has ended or is ending: it was stopped, Close has come,
+// or its end has set the failure, which runPairing does before it cancels the
+// session's context.
+func (s *pairSession) over() bool {
+	return s.ctx.Err() != nil || s.status().State == pairFailed
 }
 
 func (s *pairSession) phase() pairingPhase {
@@ -156,10 +242,15 @@ func (s *pairSession) phase() pairingPhase {
 // newPairing builds a pairing for a: its client, from newClient as it stays
 // the account's once linked, and the QR channel, which must precede the
 // connect that emits the codes.
-func (m *Manager) newPairing(a *account) (*pairSession, error) {
+func (m *Manager) newPairing(a *account, kind pairKind) (*pairSession, error) {
 	ctx, cancel := context.WithCancel(m.ctx)
-	s := &pairSession{ctx: ctx, cancel: cancel, done: make(chan struct{}), left: make(chan struct{}), st: pairStatus{State: pairStarting}}
+	s := &pairSession{
+		kind: kind, ctx: ctx, cancel: cancel, done: make(chan struct{}),
+		left: make(chan struct{}), connecting: make(chan struct{}), coded: make(chan struct{}),
+		st: pairStatus{State: pairStarting},
+	}
 	s.leave = sync.OnceFunc(func() { close(s.left) })
+	s.markCoded = sync.OnceFunc(func() { close(s.coded) })
 	s.cli = m.newClient(a, m.store.NewDevice())
 	s.cli.PrePairCallback = m.prePair(a, s)
 	ch, err := m.net.qrChannel(s.cli, ctx)
@@ -212,18 +303,29 @@ func (m *Manager) claimPhone(a *account, user string) (prev, refusal string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	prev = a.phone
-	if prev != "" && prev != user {
+	if refusal = m.phoneRefusal(a, user); refusal != "" {
+		return prev, refusal
+	}
+	a.phone = user
+	return prev, ""
+}
+
+// phoneRefusal is why a may not take the number user, or "" if it may: a
+// relinked account keeps its number, and a number belongs to one account.
+// add with a phone number asks it too, before it starts anything, but only
+// claimPhone, from PrePairCallback, records the number. mu must be held.
+func (m *Manager) phoneRefusal(a *account, user string) string {
+	if a.phone != "" && a.phone != user {
 		m.log.Warn("linking refused: a different phone number", "account", a.nick)
-		return prev, "this is a different phone number; remove the account and add it again"
+		return differentNumberReason
 	}
 	for nick, other := range m.accounts {
 		if other != a && user != "" && other.phone == user {
 			m.log.Warn("linking refused: the number is linked to another account", "account", a.nick, "other", nick)
-			return prev, fmt.Sprintf("this number is already linked as account %q", nick)
+			return fmt.Sprintf("this number is already linked as account %q", nick)
 		}
 	}
-	a.phone = user
-	return prev, ""
+	return ""
 }
 
 // releasePhone gives back what claimPhone recorded, when the device is not
@@ -271,14 +373,20 @@ func (m *Manager) readQR(a *account, s *pairSession) pairEnd {
 	fail := func(reason string) pairEnd { return pairEnd{status: StatusNeedsLink, reason: reason} }
 	ctx := s.ctx
 	if m.net.globals.wait(ctx) != nil {
-		return fail(cancelledReason)
+		return fail(s.cancelReason())
 	}
+	close(s.connecting)
 	if err := m.net.connect(s.cli); err != nil {
 		m.log.Warn("linking: connect failed", "account", a.nick, "err", err)
+		if ctx.Err() != nil { // given up on while it hung (the noise handshake ignores ctx): the account has that reason
+			return fail(s.cancelReason())
+		}
 		return fail("could not connect to WhatsApp; check the network and call add again")
 	}
-	const noCode = "could not get a QR code from WhatsApp; check the network and call add again"
-	const expired = "QR expired, call add again"
+	noCode, expired := "could not get a QR code from WhatsApp; check the network and call add again", "QR expired, call add again"
+	if s.kind == kindPhone { // nobody sees a QR code on this path
+		noCode, expired = couldNotReach, codeExpired
+	}
 	silence := time.NewTimer(m.qrSilence)
 	defer silence.Stop()
 	shown := false
@@ -287,7 +395,7 @@ func (m *Manager) readQR(a *account, s *pairSession) pairEnd {
 		var ok bool
 		select {
 		case <-ctx.Done():
-			return fail(cancelledReason)
+			return fail(s.cancelReason())
 		case <-silence.C:
 			if s.phase() == pairingBound {
 				continue // scanned: PairSuccess or PairError always follows (pair.go:148-159)
@@ -301,20 +409,21 @@ func (m *Manager) readQR(a *account, s *pairSession) pairEnd {
 		}
 		if !ok { // cancelled or a full buffer: no final item
 			if ctx.Err() != nil {
-				return fail(cancelledReason)
+				return fail(s.cancelReason())
 			}
 			return fail("linking was interrupted; call add again")
 		}
 		switch it.Event {
 		case whatsmeow.QRChannelEventCode:
+			now := time.Now()
 			if !shown {
 				m.log.Info("linking: QR code ready", "account", a.nick) // never the code itself (plan 10)
+				s.window = now.Add(windowFor(it.Timeout))               // before markCoded, as the field says
 			}
 			shown = true
 			silence.Reset(it.Timeout + m.qrSilence)
-			s.update(func(p *pairStatus) {
-				p.State, p.Code, p.Expires = pairCode, it.Code, time.Now().Add(it.Timeout)
-			})
+			s.update(func(p *pairStatus) { p.State, p.Code, p.Expires = pairCode, it.Code, now.Add(it.Timeout) })
+			s.markCoded()
 		case whatsmeow.QRChannelScannedWithoutMultidevice.Event:
 			// Not final: the same code can be scanned again (qrchan.go:154-157).
 			s.update(func(p *pairStatus) {

@@ -97,27 +97,48 @@ const (
 // (plan 6.3): the session, or nil if the decision turned out to be a
 // reconnect. See admit.
 func (m *Manager) add(ctx context.Context, nick string) (*pairSession, error) {
-	_, s, err := m.admit(ctx, nick, true)
+	_, s, err := m.admit(ctx, nick, kindPage, "")
 	return s, err
 }
 
+// errCodeSession is what the login page's start of a pairing gets when the
+// account's pairing waits for a code typed on the phone: that one is not the
+// page's to restart. The add that began it ended the link of the page, so this
+// is for a poll that was already under way then, or whose nonce an add without
+// a phone number issued while the one with it was starting the pairing.
+var errCodeSession = errors.New("the account is being linked by a pairing code")
+
 // admit is the core of the add tool for nick: it refuses with the reason as
-// the error, reconnects the account's device, or finds that the account
-// needs a pairing and, with start, starts it and returns the session. The
-// add tool itself passes false: its pairing starts only when the login page
-// polls, so an unopened link costs no session. The account exists from
-// the first call on. Each decision is taken, and acted on, under one hold of
-// mu, so a status that moves while a pairing is cancelled or built is
-// decided again. Waiting for a cancelled pairing to end, which may take a
-// noise handshake (up to 20 s, handshake.go:24), stops with ctx.
+// the error, reconnects the account's device, or finds that the account needs
+// a pairing and, with a kind other than kindNone, starts it and returns the
+// session.
 //
-// The add tool (start false) and the login page (start true) each decide for
-// themselves, and the page's answer is the one the user sees: a status that
-// moved in between, say the account got linked, shows there as a failed or a
-// reconnecting login, never as a second pairing.
-func (m *Manager) admit(ctx context.Context, nick string, start bool) (addOutcome, *pairSession, error) {
+// The kind says who asks. The add tool without a phone number passes kindNone:
+// its pairing starts only when the login page polls (kindPage), so an unopened
+// link costs no session. With a phone number it passes kindPhone and the
+// number's digits, user: before it cancels or starts anything, and only for a
+// decision to pair (a reconnect ignores the number, and a refusal of the policy
+// comes first), the number must be one the account may take (phoneRefusal). A
+// nick that is refused for it does not get an account, which would show up in
+// list; otherwise the account exists from the first call on. The tool and the
+// page each decide for themselves, and the page's answer is the one the user
+// sees: a status that moved in between, say the account got linked, shows there
+// as a failed or a reconnecting login, never as a second pairing.
+//
+// Each decision is taken, and acted on, under one hold of mu, so a status that
+// moves while a pairing is cancelled or built is decided again. Waiting for a
+// cancelled pairing to end, which may take a noise handshake (up to 20 s,
+// handshake.go:24) or a dial, stops with ctx and not before: the next add of
+// the nick waits for a pairing that hangs in its connect.
+func (m *Manager) admit(ctx context.Context, nick string, kind pairKind, user string) (addOutcome, *pairSession, error) {
 	m.mu.Lock()
 	_, known := m.accounts[nick]
+	if !known && kind == kindPhone {
+		if reason := m.phoneRefusal(newAccount(nick), user); reason != "" { // not created: it would show up in list
+			m.mu.Unlock()
+			return 0, nil, refusal(reason)
+		}
+	}
 	m.mu.Unlock()
 	if !known {
 		// The account exists from now on: a pairing that fails leaves it
@@ -126,7 +147,7 @@ func (m *Manager) admit(ctx context.Context, nick string, start bool) (addOutcom
 			return 0, nil, err
 		}
 	}
-	var s *pairSession // built on the first pair decision, with start
+	var s *pairSession // built on the first pair decision, unless kindNone
 	for {
 		m.mu.Lock()
 		if m.closed {
@@ -144,9 +165,14 @@ func (m *Manager) admit(ctx context.Context, nick string, start bool) (addOutcom
 			phase = a.sess.phase()
 		}
 		d := addPolicy(a.info, a.cli != nil, phase, time.Now())
+		if kind == kindPhone && (d.action == addPair || d.action == addRestart) { // a restart pairs again
+			if reason := m.phoneRefusal(a, user); reason != "" {
+				d = addDecision{action: addRefuse, reason: reason}
+			}
+		}
 		switch d.action {
 		case addPair:
-			if !start {
+			if kind == kindNone {
 				m.mu.Unlock()
 				return outcomePair, nil, nil
 			}
@@ -162,12 +188,16 @@ func (m *Manager) admit(ctx context.Context, nick string, start bool) (addOutcom
 			m.mu.Unlock()
 			s.drop()
 			var err error
-			if s, err = m.newPairing(a); err != nil {
+			if s, err = m.newPairing(a, kind); err != nil {
 				return 0, nil, err
 			}
 		case addRestart:
 			prev := a.sess
 			m.mu.Unlock()
+			if kind == kindPage && prev.kind == kindPhone {
+				s.drop()
+				return 0, nil, errCodeSession
+			}
 			// false: the phone has just scanned it, and the next round refuses.
 			if prev.stop() {
 				m.log.Info("cancelling the previous linking", "account", nick)

@@ -670,6 +670,69 @@ func TestPairSessionStop(t *testing.T) {
 	}
 }
 
+// TestPairSessionStopReason: the reason of the first stop is the one the
+// session ends with. A call that gives up a pairing which a newer add has
+// cancelled before does not change why it ended.
+func TestPairSessionStopReason(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stops  []string
+		reason string
+	}{
+		{"one", []string{"first"}, "first"},
+		{"the first stands", []string{"first", "second"}, "first"},
+		{"a plain cancellation stands", []string{"", "late"}, cancelledReason},
+		{"none", nil, cancelledReason},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s := &pairSession{ctx: ctx, cancel: cancel}
+			for _, why := range tc.stops {
+				if !s.stopFor(why) {
+					t.Fatalf("stopFor(%q) = false for an open session", why)
+				}
+			}
+			if got := s.cancelReason(); got != tc.reason {
+				t.Errorf("reason %q, want %q", got, tc.reason)
+			}
+		})
+	}
+}
+
+// TestPairSessionOver: a session is over once it was stopped, once Close has
+// come, and once its end has set the failure, which runPairing does before it
+// cancels the session's context.
+func TestPairSessionOver(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		do   func(s *pairSession, closing context.CancelFunc)
+		over bool
+	}{
+		{"running", func(*pairSession, context.CancelFunc) {}, false},
+		{"scanned", func(s *pairSession, _ context.CancelFunc) {
+			s.update(func(p *pairStatus) { p.State = pairPaired })
+		}, false},
+		{"stopped", func(s *pairSession, _ context.CancelFunc) { s.stop() }, true},
+		{"Close", func(_ *pairSession, closing context.CancelFunc) { closing() }, true},
+		{"failed, its context not cancelled yet", func(s *pairSession, _ context.CancelFunc) {
+			s.update(func(p *pairStatus) { p.State = pairFailed })
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, closing := context.WithCancel(context.Background())
+			defer closing()
+			ctx, cancel := context.WithCancel(parent)
+			defer cancel()
+			s := &pairSession{ctx: ctx, cancel: cancel}
+			tc.do(s, closing)
+			if got := s.over(); got != tc.over {
+				t.Errorf("over = %v, want %v", got, tc.over)
+			}
+		})
+	}
+}
+
 // TestPairingReplacesOldDevice relinks an account that has a device: the
 // old one goes only once the new one has connected. add pairs only an
 // account in needs_link, whose old device whatsmeow has deleted on

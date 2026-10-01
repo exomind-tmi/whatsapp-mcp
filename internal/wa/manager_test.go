@@ -35,9 +35,28 @@ type fakeNet struct {
 	connected map[string]bool             // phone: whether its socket is up, for Logout
 	logoutErr error                       // what Logout of a connected client returns; on nil it deletes the device, as whatsmeow does
 
-	mu    sync.Mutex
-	calls []string // "connect <phone>" once Connect returns, "disconnect <phone>", "logout <phone>", "qr <phone>"
-	qrs   []fakeQR // one per GetQRChannel
+	firstCode string                      // when set, each QR channel starts with this code, as WhatsApp's first once connected
+	pairCode  string                      // what PairPhone returns; "" for pairCodeOK
+	pairErr   error                       // what it fails with instead
+	pairHold  func(context.Context) error // runs inside PairPhone, e.g. to wait for its ctx; its error is the result
+
+	mu     sync.Mutex
+	calls  []string   // "connect <phone>" once Connect returns, "disconnect <phone>", "logout <phone>", "qr <phone>", "pairphone <phone>"
+	qrs    []fakeQR   // one per GetQRChannel
+	phones []pairCall // one per PairPhone
+}
+
+// pairCodeOK is what the fake PairPhone returns, in the format of the real
+// one (pair-code.go:142).
+const pairCodeOK = "7K2M-QX9P"
+
+// pairCall is a PairPhone as the Manager made it.
+type pairCall struct {
+	cli   *whatsmeow.Client
+	phone string
+	push  bool
+	typ   whatsmeow.PairClientType
+	name  string
 }
 
 // fakeQR is a QR channel the test feeds.
@@ -107,9 +126,29 @@ func (f *fakeNet) network(g *waGlobals) network {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			ch := make(chan whatsmeow.QRChannelItem, 8)
+			if f.firstCode != "" {
+				ch <- code(f.firstCode, 60*time.Second)
+			}
 			f.calls = append(f.calls, "qr "+phoneOf(cli))
 			f.qrs = append(f.qrs, fakeQR{cli: cli, ctx: ctx, ch: ch})
 			return ch, nil
+		},
+		pairPhone: func(cli *whatsmeow.Client, ctx context.Context, phone string, push bool, typ whatsmeow.PairClientType, name string) (string, error) {
+			f.mu.Lock()
+			f.calls = append(f.calls, "pairphone "+phoneOf(cli))
+			f.phones = append(f.phones, pairCall{cli, phone, push, typ, name})
+			hold, err, code := f.pairHold, f.pairErr, f.pairCode
+			f.mu.Unlock()
+			if hold != nil {
+				err = hold(ctx)
+			}
+			if err != nil {
+				return "", err
+			}
+			if code == "" {
+				code = pairCodeOK
+			}
+			return code, nil
 		},
 	}
 }

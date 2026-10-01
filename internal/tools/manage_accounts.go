@@ -82,6 +82,13 @@ func (d Deps) manageAccounts(ctx context.Context, _ *mcp.CallToolRequest, in man
 	return nil, ManageOut{}, fmt.Errorf("unknown action %q: use list, add or remove", in.Action)
 }
 
+// pairCodeNextStep tells what to do with a pairing code. Nothing shows the user
+// the outcome, so the agent is sent to list for it: the description of the
+// tool, which the golden file pins, does not name linking among the statuses.
+const pairCodeNextStep = "WhatsApp on the phone → Linked devices → Link a device → Link with phone number instead, " +
+	"enter the code before expires_at; then check manage-accounts action=list: " +
+	"`linking` while it waits, `connected` once linked, `needs_link` with a reason if it failed"
+
 // linkOut renders the three outcomes of add: a QR page to open, a pairing
 // code to type on the phone, or a reconnect with the keys the account has.
 func linkOut(t wa.LinkTicket) ManageOut {
@@ -96,7 +103,7 @@ func linkOut(t wa.LinkTicket) ManageOut {
 			Status:    string(wa.StatusLinking),
 			PairCode:  t.PairCode,
 			ExpiresAt: isoTime(t.ExpiresAt),
-			NextStep:  "WhatsApp on the phone → Linked devices → Link with phone number, enter the code",
+			NextStep:  pairCodeNextStep,
 		}
 	}
 	return ManageOut{

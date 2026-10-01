@@ -47,6 +47,7 @@ type network struct {
 	disconnect func(*whatsmeow.Client)
 	logout     func(*whatsmeow.Client, context.Context) error
 	qrChannel  func(*whatsmeow.Client, context.Context) (<-chan whatsmeow.QRChannelItem, error)
+	pairPhone  func(cli *whatsmeow.Client, ctx context.Context, phone string, push bool, typ whatsmeow.PairClientType, name string) (string, error)
 	retryStep  time.Duration // the backoff added per failed connect
 }
 
@@ -56,6 +57,7 @@ var liveNetwork = network{
 	disconnect: (*whatsmeow.Client).Disconnect,
 	logout:     (*whatsmeow.Client).Logout,
 	qrChannel:  (*whatsmeow.Client).GetQRChannel,
+	pairPhone:  (*whatsmeow.Client).PairPhone,
 	retryStep:  2 * time.Second, // whatsmeow's own (client.go:634)
 }
 
@@ -71,6 +73,9 @@ type Manager struct {
 	closeWait  time.Duration
 	pairedWait time.Duration
 	qrSilence  time.Duration
+	codeWait   time.Duration // add with a phone number: the first QR code, from the connect
+	phoneWait  time.Duration // and then WhatsApp's answer to PairPhone
+	abortWait  time.Duration // and the wait for a pairing it gave up on to end
 
 	// ctx is every client's BackgroundEventCtx: keepalive and whatsmeow's
 	// reconnects run on it (client.go:500-502, 583-584). It is the daemon's
@@ -136,6 +141,9 @@ func newManager(ctx context.Context, cfg Config, net network) (*Manager, error) 
 		closeWait:  closeWait,
 		pairedWait: pairedWait,
 		qrSilence:  qrSilence,
+		codeWait:   codeWait,
+		phoneWait:  phoneWait,
+		abortWait:  abortWait,
 		accounts:   map[string]*account{},
 	}
 	m.ctx, m.cancel = context.WithCancel(ctx)
