@@ -1,6 +1,6 @@
 # Third-party notices
 
-whatsapp-mcp is MIT-licensed (see [LICENSE](LICENSE)). The binaries also contain
+whatsapp-mcp is licensed under GPL-3.0 (see [LICENSE](LICENSE)). The binaries also contain
 the code listed below, each under its own license. Every GitHub Release ships
 their full license texts as `whatsapp-mcp_<version>_licenses.zip`.
 

@@ -94,4 +94,4 @@ All third-party components and their licenses are listed in
 
 ## License
 
-[MIT](LICENSE) © 2026 Exomind Tmi
+[GPL-3.0](LICENSE) © 2026 Exomind Tmi
