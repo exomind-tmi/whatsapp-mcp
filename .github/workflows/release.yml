@@ -162,7 +162,7 @@ jobs:
             # own) and the plugin package.
             go test ./tests/launcher/
             bash scripts/plugin.sh
-            git commit --quiet -am "Pin the plugin to $TAG"
+            git commit --quiet -am "chore(release): pin the plugin to $TAG"
             git push origin HEAD:main && exit 0
             echo "main moved, retrying"
             sleep $((attempt * 5))
