@@ -79,11 +79,17 @@ func addPolicy(info AccountInfo, device bool, pairing pairingPhase, now time.Tim
 
 var errClosing = errors.New("whatsapp-mcp is shutting down")
 
-// refusal is an add that the policy refuses: its text is for the user, unlike
-// that of the errors that come from the database or the network.
+// refusal is a call that is refused: its text is for the user, unlike that of
+// the errors that come from the database or the network.
 type refusal string
 
 func (r refusal) Error() string { return string(r) }
+
+// errStillFinishing is the answer of add to a call that has waited abortWait for the
+// pairing of an earlier call, which it has told to stop, and it is still not over:
+// the call has started nothing, and a later one finds it over. See awaitEnd; remove
+// answers errStillCancelling and errStillRemoving.
+const errStillFinishing = refusal("the previous attempt is still finishing; repeat the call in a minute")
 
 // addOutcome is what admit did for an account that was not refused.
 type addOutcome int
@@ -93,12 +99,55 @@ const (
 	outcomeReconnect                       // its device is connecting again, with the existing keys
 )
 
+// admitted is what admit did for an account that was not refused.
+type admitted struct {
+	outcome addOutcome
+	sess    *pairSession // the pairing, started: for outcomePair with a kind other than kindNone
+	link    *loginNonce  // the login link, issued: for outcomePair with kindNone
+}
+
 // add starts the pairing of nick, as the login page does when it first polls
 // (plan 6.3): the session, or nil if the decision turned out to be a
 // reconnect. See admit.
 func (m *Manager) add(ctx context.Context, nick string) (*pairSession, error) {
-	_, s, err := m.admit(ctx, nick, kindPage, "")
-	return s, err
+	adm, err := m.admit(ctx, nick, kindPage, "")
+	return adm.sess, err
+}
+
+// awaitEnd waits for done, the end of a pairing or of the unlinking of a device that
+// a call has told to stop or has begun, for at most abortWait. A connect in the
+// noise handshake ignores the stop (client.go:500-502, handshake.go:24, 46-50) and
+// holds the socket lock that a Disconnect or a Logout needs, so what hangs there
+// ends only with it, ~20 s later, or ~60 s in a network that takes no answers: the
+// call is not to wait for that, and it must not go on with the thing still owning
+// the account's client, so it answers errStillFinishing instead. Every call that
+// waits for such an end waits here: add of each kind and remove. The answer to a
+// wait that runs out is still, the call's own words for it. The call's ctx and
+// Close end the wait with their errors.
+func (m *Manager) awaitEnd(ctx context.Context, done <-chan struct{}, still error) error {
+	timer := time.NewTimer(m.abortWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return still
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.ctx.Done():
+		return errClosing
+	}
+}
+
+// cancelPairing cancels prev, the pairing of nick's account, and waits for it to
+// end (awaitEnd), as add and remove do before they decide again. prev that has taken
+// a device is not cancelled, and the caller's next decision refuses.
+func (m *Manager) cancelPairing(ctx context.Context, nick string, prev *pairSession, still error) error {
+	if !prev.stop() { // the phone has just scanned it
+		return nil
+	}
+	m.log.Info("cancelling the previous linking", "account", nick)
+	return m.awaitEnd(ctx, prev.done, still)
 }
 
 // errNotPageSession is what the login page's start of a pairing gets when the
@@ -116,52 +165,95 @@ var errNotPageSession = errors.New("the account is being linked by a pairing cod
 //
 // The kind says who asks. The add tool without a phone number passes kindNone:
 // its pairing starts only when the login page polls (kindPage), so an unopened
-// link costs no session. With qr_image it passes kindChat, which starts the
-// pairing at once, as its first QR code is the answer. With a phone number it
-// passes kindPhone and the number's digits, user: before it cancels or starts
-// anything, and only for a decision to pair (a reconnect ignores the number,
-// and a refusal of the policy comes first), the number must be one the account
-// may take (phoneRefusal). A nick that is refused for it does not get an
-// account, which would show up in list; otherwise the account exists from the
-// first call on. The tool and the page each decide for themselves, and the
-// page's answer is the one the user sees: a status that moved in between, say
-// the account got linked, shows there as a failed or a reconnecting login,
-// never as a second pairing.
+// link costs no session, and what comes back is the link, issued. With qr_image
+// it passes kindChat, which starts the pairing at once, as its first QR code is
+// the answer. With a phone number it passes kindPhone and the number's digits,
+// user: before it cancels or starts anything, and only for a decision to pair (a
+// reconnect ignores the number, and a refusal of the policy comes first), the
+// number must be one the account may take (phoneRefusal). A nick that is refused
+// for it does not get an account, which would show up in list; otherwise the
+// account exists from the first call on. The tool and the page each decide for
+// themselves, and the page's answer is the one the user sees: a status that
+// moved in between, say the account got linked, shows there as a failed or a
+// reconnecting login, never as a second pairing.
 //
 // Each decision is taken, and acted on, under one hold of mu, so a status that
-// moves while a pairing is cancelled or built is decided again. Waiting for a
-// cancelled pairing to end, which may take a noise handshake (up to 20 s,
-// handshake.go:24) or a dial, stops with ctx and not before: the next add of
-// the nick waits for a pairing that hangs in its connect.
-func (m *Manager) admit(ctx context.Context, nick string, kind pairKind, user string) (addOutcome, *pairSession, error) {
+// moves while a pairing is cancelled or built is decided again. That includes
+// the login link: an add that hands out no link of its own, a reconnect or a
+// pairing for the chat or by code, revokes the nick's, and an add that does hand
+// one out issues it, in the same hold as the decision, so that the link left is
+// always the latest decision's, whichever call gets on first. The login page
+// itself, kindPage, leaves the links alone: the one it holds is its own, and it
+// makes no account: a poll that finds none, because a remove has taken the account
+// since its nonce was found, is answered ErrNoLogin and does not bring it back.
+// Waiting for a cancelled pairing to end, which may take a noise handshake (up to
+// 20 s, handshake.go:24) or a dial, is bound by abortWait and ctx (awaitEnd): the
+// next add of the nick, finding it still not over, refuses to start another over
+// it. An account that a remove has is refused.
+//
+// The account's row in archive.db and its entry in the manager go together: a
+// remove deletes the row and then drops the entry, counting it (m.removed), and
+// admit that has ensured the row, and then finds no entry, makes the row again if
+// a remove has dropped any account since (rowAt), as it may have been this one.
+func (m *Manager) admit(ctx context.Context, nick string, kind pairKind, user string) (admitted, error) {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return admitted{}, errClosing // before it makes a row
+	}
 	_, known := m.accounts[nick]
+	if !known && kind == kindPage {
+		m.mu.Unlock()
+		return admitted{}, ErrNoLogin
+	}
 	if !known && kind == kindPhone {
 		if reason := m.phoneRefusal(newAccount(nick), user); reason != "" { // not created: it would show up in list
 			m.mu.Unlock()
-			return 0, nil, refusal(reason)
+			return admitted{}, refusal(reason)
 		}
 	}
+	rowAt := m.removed // an account that is known has its row as of now, and one that is not gets it next
 	m.mu.Unlock()
 	if !known {
 		// The account exists from now on: a pairing that fails leaves it
 		// needs_link, "not linked yet" after a restart.
 		if err := m.db.AddAccount(ctx, nick); err != nil {
-			return 0, nil, err
+			return admitted{}, err
 		}
 	}
 	var s *pairSession // built on the first pair decision, unless kindNone
+	var built *account // the account s was built for
 	for {
 		m.mu.Lock()
 		if m.closed {
 			m.mu.Unlock()
 			s.drop()
-			return 0, nil, errClosing
+			return admitted{}, errClosing
 		}
 		a := m.accounts[nick]
 		if a == nil {
+			if kind == kindPage { // removed since the nonce was found
+				m.mu.Unlock()
+				s.drop()
+				return admitted{}, ErrNoLogin
+			}
+			if rowAt != m.removed { // a remove has dropped an account since the row was ensured
+				rowAt = m.removed
+				m.mu.Unlock()
+				s.drop()
+				s, built = nil, nil
+				if err := m.db.AddAccount(ctx, nick); err != nil {
+					return admitted{}, err
+				}
+				continue
+			}
 			a = newAccount(nick)
 			m.accounts[nick] = a
+		}
+		if a.removing || a.unlinking != nil {
+			m.mu.Unlock()
+			s.drop()
+			return admitted{}, refusal(fmt.Sprintf("account %q is being removed; repeat the call in a minute", nick))
 		}
 		phase := noPairing
 		if a.sess != nil {
@@ -176,54 +268,56 @@ func (m *Manager) admit(ctx context.Context, nick string, kind pairKind, user st
 		switch d.action {
 		case addPair:
 			if kind == kindNone {
+				link := m.nonces.issue(nick)
 				m.mu.Unlock()
-				return outcomePair, nil, nil
+				return admitted{outcome: outcomePair, link: link}, nil
 			}
-			if s != nil {
+			if s != nil && built == a {
 				m.wg.Add(1) // under mu and not closed, as track does
 				a.sess, a.pcli = s, s.cli
 				a.info = with(a.info, StatusLinking, "", time.Time{})
+				if kind != kindPage {
+					m.nonces.revoke(nick)
+				}
 				m.mu.Unlock()
 				m.log.Info("linking started", "account", nick)
 				go m.runPairing(a, s)
-				return outcomePair, s, nil
+				return admitted{outcome: outcomePair, sess: s}, nil
 			}
 			m.mu.Unlock()
-			s.drop()
+			s.drop() // built for an account that a remove has taken since, or not at all
 			var err error
 			if s, err = m.newPairing(a, kind); err != nil {
-				return 0, nil, err
+				return admitted{}, err
 			}
+			built = a
 		case addRestart:
 			prev := a.sess
 			m.mu.Unlock()
 			if kind == kindPage && prev.kind != kindPage { // a page restarts only its own kind
 				s.drop()
-				return 0, nil, errNotPageSession
+				return admitted{}, errNotPageSession
 			}
-			// false: the phone has just scanned it, and the next round refuses.
-			if prev.stop() {
-				m.log.Info("cancelling the previous linking", "account", nick)
-				select {
-				case <-prev.done:
-				case <-ctx.Done():
-					s.drop()
-					return 0, nil, ctx.Err()
-				}
+			if err := m.cancelPairing(ctx, nick, prev, errStillFinishing); err != nil {
+				s.drop()
+				return admitted{}, err
 			}
 		case addReconnect:
 			// Before the connect: Connected does not move replaced (see next).
 			a.info = with(a.info, StatusReconnecting, "", time.Time{})
+			if kind != kindPage {
+				m.nonces.revoke(nick)
+			}
 			cli := a.cli
 			m.mu.Unlock()
 			s.drop()
 			m.log.Info("reconnecting the account with its existing device", "account", nick)
 			m.connect(a, cli)
-			return outcomeReconnect, nil, nil
+			return admitted{outcome: outcomeReconnect}, nil
 		default:
 			m.mu.Unlock()
 			s.drop()
-			return 0, nil, refusal(d.reason)
+			return admitted{}, refusal(d.reason)
 		}
 	}
 }

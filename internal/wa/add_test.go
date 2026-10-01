@@ -78,7 +78,12 @@ func TestAdd(t *testing.T) {
 	if s, err := m.add(ctx, "personal"); s != nil || err == nil || !strings.Contains(err.Error(), "reconnects by itself") {
 		t.Errorf("add while reconnecting = %v, %v; want a refusal", s, err)
 	}
-	for i, nick := range []string{"fresh", "nobody"} {
+	for i, nick := range []string{"fresh", "second"} {
+		if nick == "second" { // the add tool makes the account, and the login page comes after
+			if _, err := m.Link(ctx, LinkRequest{Nick: nick}); err != nil {
+				t.Fatal(err)
+			}
+		}
 		s, err := m.add(ctx, nick)
 		if s == nil || err != nil {
 			t.Fatalf("add(%s) = %v, %v; want a pairing", nick, s, err)
@@ -89,6 +94,15 @@ func TestAdd(t *testing.T) {
 		accountJID(t, f, nick) // in archive.db
 		fn.qr(t, i).ch <- whatsmeow.QRChannelTimeout
 		<-s.done
+	}
+	// The login page makes no account: a poll that finds none, as one that a remove
+	// has overtaken does, is answered ErrNoLogin and makes neither the row nor the
+	// account, nor a pairing.
+	if s, err := m.add(ctx, "nobody"); s != nil || !errors.Is(err, ErrNoLogin) || hasAccount(m, "nobody") || qrCount(fn) != 2 {
+		t.Errorf("add(nobody) = %v, %v; want ErrNoLogin and no account", s, err)
+	}
+	if _, there := archiveOf(t, f)["nobody"]; there {
+		t.Error("the login page made a row in archive.db")
 	}
 
 	dispatch(&events.TemporaryBan{Code: events.TempBanSentToTooManyPeople, Expire: time.Hour})
@@ -130,7 +144,13 @@ func TestAdd(t *testing.T) {
 			t.Errorf("add(%s) after Close: %v", nick, err)
 		}
 	}
+	if _, err := m.Link(ctx, LinkRequest{Nick: "later"}); !errors.Is(err, errClosing) { // the add tool makes accounts
+		t.Errorf("Link(later) after Close: %v", err)
+	}
 	m.wg.Wait()
+	if _, there := archiveOf(t, f)["later"]; there || hasAccount(m, "later") {
+		t.Error("an add after Close made an account")
+	}
 	if n := connects(); n != 3 || strings.Count(strings.Join(fn.called(false), "\n"), "qr pairing") != 2 {
 		t.Errorf("a connect or a pairing started after Close: %v", fn.called(true))
 	}

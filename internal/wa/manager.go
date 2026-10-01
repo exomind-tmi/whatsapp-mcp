@@ -12,7 +12,6 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
-	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 
@@ -30,6 +29,10 @@ const maxReconnectErrors = 30
 // (handshake.go:24, 46-50) and holds the socket lock Disconnect needs, while
 // a daemon taking over waits only 5 s for the lock (daemon.lockWait).
 const closeWait = 3 * time.Second
+
+// noKeysReason is what an account says that has no device at start: store.db has
+// no keys for its accounts.jid.
+const noKeysReason = "this computer has no keys for the device; link the account again"
 
 // Config is what the daemon hands the Manager.
 type Config struct {
@@ -66,7 +69,7 @@ var liveNetwork = network{
 type Manager struct {
 	log        *slog.Logger
 	db         *archive.DB
-	store      *sqlstore.Container
+	store      *deviceStore
 	baseURL    string
 	nonces     *loginNonces
 	net        network
@@ -75,7 +78,8 @@ type Manager struct {
 	qrSilence  time.Duration
 	codeWait   time.Duration // add with a phone number or qr_image: the first QR code, from the connect
 	phoneWait  time.Duration // and then WhatsApp's answer to PairPhone
-	abortWait  time.Duration // and the wait for a pairing it gave up on to end
+	abortWait  time.Duration // and the wait of any call for what it has told to stop, a pairing or a device being unlinked, to end (see awaitEnd)
+	logoutWait time.Duration // the Logout of a device that is taken away: a removed account's, a relinked account's old one
 
 	// ctx is every client's BackgroundEventCtx: keepalive and whatsmeow's
 	// reconnects run on it (client.go:500-502, 583-584). It is the daemon's
@@ -88,6 +92,7 @@ type Manager struct {
 	// client's handler lock while our handler waits for mu (client.go:980-990).
 	mu       sync.Mutex
 	accounts map[string]*account
+	removed  uint64 // how many accounts dropAccount has dropped
 	closed   bool
 
 	closeOnce sync.Once
@@ -105,6 +110,13 @@ type account struct {
 	cli   *whatsmeow.Client // nil while the account has no device
 	pcli  *whatsmeow.Client // the pairing client while it owns the status, else nil
 	sess  *pairSession      // the latest pairing, kept after it ends for the login page
+
+	// What remove sets (see remove.go). add refuses an account that is removing or
+	// unlinking, and remove one that is removing; a remove finding the account
+	// unlinking waits for that.
+	removing   bool    // a remove call has the account
+	unlinking  *unlink // the goroutine taking its device away, which may outlive the call that began it
+	removeHint string  // what remove tells once the device is gone: kept for a remove that has to be repeated
 }
 
 // newAccount is an account with no device.
@@ -144,6 +156,7 @@ func newManager(ctx context.Context, cfg Config, net network) (*Manager, error) 
 		codeWait:   codeWait,
 		phoneWait:  phoneWait,
 		abortWait:  abortWait,
+		logoutWait: logoutWait,
 		accounts:   map[string]*account{},
 	}
 	m.ctx, m.cancel = context.WithCancel(ctx)
@@ -168,7 +181,8 @@ func newManager(ctx context.Context, cfg Config, net network) (*Manager, error) 
 // device (pair.go:204 vs 226), so a fresh pairing never leaves one; orphans
 // are the old devices of a relink cut short by a crash before dropOld. The
 // sweep runs before the daemon serves, so it never sees a pairing in
-// progress.
+// progress. It ends with the clean-up of store.db that a remove makes
+// (deviceStore.forget).
 func (m *Manager) load(ctx context.Context) error {
 	accs, err := m.db.Accounts(ctx)
 	if err != nil {
@@ -199,7 +213,7 @@ func (m *Manager) load(ctx context.Context) error {
 		a.phone = jid.User
 		dev := byJID[jid.String()]
 		if dev == nil {
-			a.info.Reason = "this computer has no keys for the device; link the account again"
+			a.info.Reason = noKeysReason
 			continue
 		}
 		delete(byJID, jid.String())
@@ -215,6 +229,11 @@ func (m *Manager) load(ctx context.Context) error {
 		if err := m.store.DeleteDevice(ctx, d); err != nil {
 			m.log.Warn("delete orphan device", "jid", jid, "err", err)
 		}
+	}
+	// What the devices deleted before leave behind: the orphans just now, devices
+	// whatsmeow deleted on LoggedOut, a remove cut short by a crash.
+	if err := m.store.forget(ctx); err != nil {
+		m.log.Warn("clean up store.db", "err", err)
 	}
 	return nil
 }
@@ -320,7 +339,14 @@ func (m *Manager) connect(a *account, cli *whatsmeow.Client) {
 				return
 			}
 			if errors.Is(err, store.ErrDeviceDeleted) {
-				m.log.Error("connect", "account", a.nick, "err", err)
+				// A device that remove or a relink took away is no news; one that
+				// the account still has, deleted by whatsmeow, is.
+				m.mu.Lock()
+				ours := a.cli == cli && a.unlinking == nil
+				m.mu.Unlock()
+				if ours {
+					m.log.Error("connect", "account", a.nick, "err", err)
+				}
 				return
 			}
 			delay := time.Duration(n) * m.net.retryStep
@@ -364,10 +390,6 @@ func (m *Manager) Accounts(ctx context.Context) []AccountInfo {
 	m.mu.Unlock()
 	slices.SortFunc(out, func(a, b AccountInfo) int { return strings.Compare(a.Nick, b.Nick) })
 	return out
-}
-
-func (*Manager) Remove(context.Context, string) (RemoveResult, error) {
-	return RemoveResult{}, ErrNotImplemented
 }
 
 // Close disconnects every client and closes store.db; later calls return

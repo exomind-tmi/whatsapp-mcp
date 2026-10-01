@@ -110,10 +110,14 @@ func TestShimForwardsToDaemon(t *testing.T) {
 	if res.IsError || !strings.Contains(text, `"login_url":"http://127.0.0.1:`) {
 		t.Fatalf("add via daemon: isError=%v %s", res.IsError, text)
 	}
-	// remove is not implemented yet, which is also how an isError result is
-	// seen to survive the forwarding.
+	// remove forgets the account the add made, and a second one is refused: which
+	// is also how an isError result is seen to survive the forwarding.
 	res, text = callText(t, cs, "manage-accounts", map[string]any{"action": "remove", "account_id": "personal"})
-	if !res.IsError || !strings.Contains(text, "not implemented yet") {
+	if res.IsError || !strings.Contains(text, `"status":"removed"`) {
+		t.Fatalf("remove via daemon: isError=%v %s", res.IsError, text)
+	}
+	res, text = callText(t, cs, "manage-accounts", map[string]any{"action": "remove", "account_id": "personal"})
+	if !res.IsError || !strings.Contains(text, `no account "personal"`) {
 		t.Fatalf("remove: isError lost in forwarding: %v %s", res.IsError, text)
 	}
 }

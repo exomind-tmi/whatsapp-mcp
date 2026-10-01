@@ -62,7 +62,8 @@ func (n *loginNonce) release() { <-n.lock }
 // loginNonces holds the nonce of each nick's latest add, in memory only: a
 // restarted daemon has a new port, so no link outlives it anyway.
 type loginNonces struct {
-	now func() time.Time // the clock, replaced by tests
+	now      func() time.Time // the clock, replaced by tests
+	onChange func()           // set by tests, called as issue and revoke begin, before they take mu: to see what lock the caller holds
 
 	mu     sync.Mutex
 	byNick map[string]*loginNonce
@@ -74,6 +75,9 @@ func newLoginNonces() *loginNonces {
 
 // issue makes a new nonce for nick; the one before stops working.
 func (n *loginNonces) issue(nick string) *loginNonce {
+	if n.onChange != nil {
+		n.onChange()
+	}
 	b := make([]byte, nonceBytes)
 	rand.Read(b) // never fails (Go 1.24)
 	now := n.now()
@@ -93,6 +97,9 @@ func (n *loginNonces) issue(nick string) *loginNonce {
 // revoke ends the nonce of nick, if any: an add that hands out no link
 // replaces the one handed out before just as one that does.
 func (n *loginNonces) revoke(nick string) {
+	if n.onChange != nil {
+		n.onChange()
+	}
 	n.mu.Lock()
 	delete(n.byNick, nick)
 	n.mu.Unlock()

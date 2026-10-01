@@ -5,7 +5,10 @@
 package sqlitedb
 
 import (
+	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -33,6 +36,25 @@ const Pragmas = "_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=s
 // Open opens the database at path; query holds the driver's DSN parameters.
 func Open(path, query string) (*sql.DB, error) {
 	return sql.Open("sqlite", DSN(path, query))
+}
+
+// ErrCheckpointBusy means a reader kept a checkpoint from emptying the WAL.
+var ErrCheckpointBusy = errors.New("a reader kept the checkpoint from finishing")
+
+// Checkpoint moves the WAL into the database file and truncates it, which a remove
+// needs: secure_delete zeroes the pages in the file, but the WAL holds the rows as
+// they were written until then. A checkpoint that a reader holds off does not fail
+// the statement: it waits busy_timeout, and the answer is a row whose first column
+// is 1, which ExecContext would never look at.
+func Checkpoint(ctx context.Context, db *sql.DB) error {
+	var busy, frames, moved int
+	if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &frames, &moved); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return fmt.Errorf("%w (%d of %d frames moved)", ErrCheckpointBusy, moved, frames)
+	}
+	return nil
 }
 
 // DSN builds a proper file: URI. SQLite parses the DSN as a URI, so '#', '%'

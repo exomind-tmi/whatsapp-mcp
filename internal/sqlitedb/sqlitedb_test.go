@@ -1,6 +1,8 @@
 package sqlitedb
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,6 +63,52 @@ func TestPragmas(t *testing.T) {
 		if err := db.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil || got != want {
 			t.Errorf("PRAGMA %s = %q, %v; want %q", pragma, got, err, want)
 		}
+	}
+}
+
+// TestCheckpoint: a checkpoint that a reader holds off is an error, not the silent
+// success it is to the driver, and one that is not held off empties the WAL.
+func TestCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	p := filepath.Join(testutil.TempDir(t), "x.db")
+	db, err := Open(p, "_pragma=journal_mode(WAL)&_pragma=busy_timeout(200)&_pragma=secure_delete(1)&_txlock=immediate") // Pragmas, with a short wait
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE t(x); INSERT INTO t VALUES ('a'), ('b')`); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := db.Conn(ctx) // its snapshot is older than the writes that follow
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var n int
+	if _, err := reader.ExecContext(ctx, `BEGIN DEFERRED`); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.QueryRowContext(ctx, `SELECT count(*) FROM t`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO t VALUES ('c'); DELETE FROM t WHERE x = 'a'`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		t.Fatalf("the driver reports the held-off checkpoint after all: %v; Checkpoint is not needed", err)
+	}
+	if err := Checkpoint(ctx, db); !errors.Is(err, ErrCheckpointBusy) {
+		t.Errorf("Checkpoint with a reader = %v, want ErrCheckpointBusy", err)
+	}
+	if _, err := reader.ExecContext(ctx, `COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Checkpoint(ctx, db); err != nil {
+		t.Errorf("Checkpoint without a reader = %v", err)
+	}
+	if fi, err := os.Stat(p + "-wal"); err != nil || fi.Size() != 0 {
+		t.Errorf("the WAL after the checkpoint: %v, %v; want it empty", fi, err)
 	}
 }
 

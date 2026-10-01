@@ -3,6 +3,7 @@ package archive
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/exomind-tmi/whatsapp-mcp/internal/sqlitedb"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/testutil"
 )
 
@@ -307,6 +309,160 @@ func TestDeleteAccountLeavesNoTrace(t *testing.T) {
 	}
 	if inFiles(t, p, marker) {
 		t.Fatal("the deleted text is still in archive.db or its WAL")
+	}
+}
+
+// ftsTrigrams are those of the words of insertRareText: they are in no other text of
+// these tests, and the full-text index keeps nothing but trigrams of the text.
+var ftsTrigrams = []string{"zqx", "qxj", "xjv", "jvm", "qwf", "wfp", "fpg", "pgj", "gjl", "jlu", "luy", "xkc", "kcd", "cdb", "dbv", "bvn", "vnm"}
+
+func insertRareText(t *testing.T, db *DB, nick string) {
+	t.Helper()
+	if _, err := db.w.Exec(`INSERT INTO messages(account, chat_jid, msg_id, sender_jid, from_me, ts, text)
+	  VALUES (?, 'c1@s.whatsapp.net', 'rare', 'c1@s.whatsapp.net', 0, 9, 'zqxjvmarker qwfpgjluy xkcdbvnm')`, nick); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func trigramsInFiles(t *testing.T, p string) (n int) {
+	t.Helper()
+	for _, tri := range ftsTrigrams {
+		if inFiles(t, p, tri) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestDeleteAccountLeavesNoTrigrams: the full-text index is made of the trigrams of
+// the text, so deleting a message leaves them in the index's segments, only marked
+// as deleted, until a merge drops them: without the 'optimize', most of the text of
+// an account that was forgotten stays readable in archive.db.
+func TestDeleteAccountLeavesNoTrigrams(t *testing.T) {
+	p := filepath.Join(testutil.TempDir(t), "archive.db")
+	db := openAt(t, p)
+	seed(t, db, "alice")
+	seed(t, db, "bob")
+	insertRareText(t, db, "alice")
+	if _, err := db.w.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	if n := trigramsInFiles(t, p); n != len(ftsTrigrams) {
+		t.Fatalf("%d of %d trigrams are in the files before the delete: the test checks nothing", n, len(ftsTrigrams))
+	}
+
+	if err := db.DeleteAccount(context.Background(), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if n := trigramsInFiles(t, p); n != 0 {
+		t.Errorf("%d of %d trigrams of the deleted text are still in archive.db or its WAL", n, len(ftsTrigrams))
+	}
+	if got := count(t, db, `SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'bob'`); got != 2 {
+		t.Errorf("bob has %d FTS rows after the merge, want 2", got)
+	}
+}
+
+// goneContext is a ctx of a client that gives up as soon as the account it asked to
+// delete is gone from the database: it looks at the file from a connection of its
+// own, so it reports the cancel after the delete has committed and not before.
+type goneContext struct {
+	context.Context
+	db   *sql.DB
+	nick string
+	done chan struct{} // closed
+}
+
+func (c goneContext) Done() <-chan struct{} {
+	var n int
+	if err := c.db.QueryRow(`SELECT count(*) FROM accounts WHERE nick = ?`, c.nick).Scan(&n); err == nil && n == 0 {
+		return c.done
+	}
+	return nil
+}
+
+func (c goneContext) Err() error {
+	if c.Done() != nil {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestDeleteAccountScrubsWhateverBecomesOfCtx: a client that gives up on the call
+// after the delete has committed does not leave the files half scrubbed: the
+// VACUUM and the checkpoint are not the request's to cancel.
+func TestDeleteAccountScrubsWhateverBecomesOfCtx(t *testing.T) {
+	p := filepath.Join(testutil.TempDir(t), "archive.db")
+	db := openAt(t, p)
+	seed(t, db, "alice")
+	seed(t, db, "bob")
+	insertRareText(t, db, "alice")
+	watch, err := sqlitedb.Open(p, sqlitedb.Pragmas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watch.Close()
+	ctx := goneContext{Context: context.Background(), db: watch, nick: "alice", done: make(chan struct{})}
+	close(ctx.done)
+	if ctx.Err() != nil {
+		t.Fatal("the context is cancelled before the delete")
+	}
+
+	if err := db.DeleteAccount(ctx, "alice"); err != nil {
+		t.Fatalf("DeleteAccount = %v; the cancel after the delete should not matter", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the account is still there")
+	}
+	if n := trigramsInFiles(t, p); n != 0 {
+		t.Errorf("%d of %d trigrams are in the files: the scrub gave way to the cancelled ctx", n, len(ftsTrigrams))
+	}
+	if n := count(t, db, `PRAGMA freelist_count`); n != 0 {
+		t.Errorf("%d free pages left: VACUUM did not run", n)
+	}
+}
+
+// TestDeleteAccountSaysWhenItCouldNotScrub: a reader that holds off the checkpoint
+// leaves old copies in the WAL; the account is deleted all the same, and the caller
+// is told, by an error it can tell from the failure of the delete.
+func TestDeleteAccountSaysWhenItCouldNotScrub(t *testing.T) {
+	ctx := context.Background()
+	p := filepath.Join(testutil.TempDir(t), "archive.db")
+	db := openAt(t, p)
+	seed(t, db, "alice")
+	seed(t, db, "bob")
+	if _, err := db.w.Exec(`PRAGMA busy_timeout = 200`); err != nil { // the one connection of the writer
+		t.Fatal(err)
+	}
+	other, err := sqlitedb.Open(p, sqlitedb.Pragmas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	reader, err := other.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var n int
+	if _, err := reader.ExecContext(ctx, `BEGIN DEFERRED`); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.QueryRowContext(ctx, `SELECT count(*) FROM messages`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.DeleteAccount(ctx, "alice")
+	if !errors.Is(err, ErrNotScrubbed) || !errors.Is(err, sqlitedb.ErrCheckpointBusy) {
+		t.Fatalf("DeleteAccount with a reader = %v, want ErrNotScrubbed with the busy checkpoint", err)
+	}
+	if got := count(t, db, `SELECT count(*) FROM accounts WHERE nick = 'alice'`); got != 0 {
+		t.Error("the account is still there")
+	}
+	if _, err := reader.ExecContext(ctx, `COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteAccount(ctx, "alice"); !errors.Is(err, ErrNoAccount) {
+		t.Errorf("a second DeleteAccount = %v, want ErrNoAccount", err)
 	}
 }
 

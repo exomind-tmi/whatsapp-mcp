@@ -101,9 +101,16 @@ func storedDevices(t *testing.T, m *Manager) []string {
 	return out
 }
 
-// pair starts a pairing for nick with add.
+// pair starts a pairing for nick with add, as the login page does: the page comes
+// after the add tool, which has made the account and its link, so a nick that the
+// manager does not know yet gets that first.
 func pair(t *testing.T, m *Manager, nick string) *pairSession {
 	t.Helper()
+	if !hasAccount(m, nick) {
+		if _, err := m.admit(context.Background(), nick, kindNone, ""); err != nil {
+			t.Fatalf("add(%s) = %v", nick, err)
+		}
+	}
 	s, err := m.add(context.Background(), nick)
 	if err != nil || s == nil {
 		t.Fatalf("add(%s) = %v, %v; want a pairing", nick, s, err)
@@ -380,7 +387,7 @@ func TestPrePairCallback(t *testing.T) {
 				return
 			}
 			<-s.done
-			reason := "this is a different phone number; remove the account and add it again"
+			reason := differentNumberReason
 			if got := s.status(); got.State != pairFailed || got.Reason != reason {
 				t.Errorf("session %+v", got)
 			}
@@ -413,7 +420,7 @@ func TestPrePairCallbackOneNumberOneAccount(t *testing.T) {
 			refusal: `this number is already linked as account "work"`},
 		{name: "other nick, different number", accs: map[string]string{"work": other}, scanned: phone},
 		{name: "relink with the number of another", accs: map[string]string{"work": other}, bound: phone, scanned: other,
-			refusal: "this is a different phone number; remove the account and add it again"},
+			refusal: differentNumberReason},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -528,8 +535,17 @@ func TestPrePairCallbackConcurrent(t *testing.T) {
 	}
 }
 
-// differentNumber is the refusal of a relink with another number.
-const differentNumber = "this is a different phone number; remove the account and add it again"
+// TestDifferentNumberReason pins the wording of the refusal of a relink with
+// another number: the way out of it, remove and add, deletes the archive, and
+// the refusal may be false, so the agent is told to ask the user first.
+func TestDifferentNumberReason(t *testing.T) {
+	for _, want := range []string{"different phone number", "remove the account and add it again",
+		"removing the account deletes its message archive", "ask the user first"} {
+		if !strings.Contains(differentNumberReason, want) {
+			t.Errorf("the refusal %q lacks %q", differentNumberReason, want)
+		}
+	}
+}
 
 // numberOf is the number the manager holds for nick.
 func numberOf(m *Manager, nick string) string {
@@ -552,8 +568,8 @@ func requireRelinkKeepsNumber(t *testing.T, m *Manager, fn *fakeNet, nick, bound
 		t.Fatal("a relink with another number was taken")
 	}
 	<-s.done
-	if got := s.status(); got.Reason != differentNumber {
-		t.Errorf("session %+v, want failed: %s", got, differentNumber)
+	if got := s.status(); got.Reason != differentNumberReason {
+		t.Errorf("session %+v, want failed: %s", got, differentNumberReason)
 	}
 }
 

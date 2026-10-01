@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/exomind-tmi/whatsapp-mcp/internal/sqlitedb"
 )
 
 var (
@@ -92,13 +94,23 @@ func (db *DB) SetAccountJID(ctx context.Context, nick, jid string) error {
 	return err
 }
 
+// ErrNotScrubbed means DeleteAccount has deleted the account, and what it did after
+// to leave nothing of it in the files has not all worked: it is gone for good, and
+// old copies of its rows may be in the file or the WAL until the next checkpoint.
+var ErrNotScrubbed = errors.New("the account is deleted, but its old copies may still be in archive.db or its WAL")
+
 // DeleteAccount forgets the account and, by ON DELETE CASCADE, its whole
 // archive: chats, messages with their full-text index, the history queue.
-// secure_delete has zeroed the freed pages; VACUUM gives them back to the
-// file system (simpler than auto_vacuum, and a remove is rare), and the
-// checkpoint moves its result into archive.db and empties the WAL, which
-// still holds the rows as they were written. Both are best effort: the
-// delete is committed. A reader that holds off the checkpoint leaves the
+// secure_delete has zeroed the freed pages. The full-text index is a trigram
+// one with the positions of the words, and its deletes only mark the entries
+// (contentless_delete), which a merge drops: the 'optimize' that follows is what
+// leaves no piece of the text in its segments. VACUUM gives the pages back to the
+// file system (simpler than auto_vacuum, and a remove is rare), and the checkpoint
+// moves its result into archive.db and empties the WAL, which still holds the rows
+// as they were written. These three are best effort, as the delete is committed,
+// and they run whatever becomes of ctx, which a client that has given up on the
+// call must not turn into a delete left half scrubbed; if any of them fails, the
+// error is ErrNotScrubbed. A reader that holds off the checkpoint leaves the
 // VACUUM's copy of the database in the WAL; the automatic checkpoints move it
 // later, and journal_size_limit (sqlitedb.Pragmas) cuts the file back.
 // VACUUM cannot run inside a transaction, so it goes straight to the writer;
@@ -108,8 +120,19 @@ func (db *DB) DeleteAccount(ctx context.Context, nick string) error {
 	if err := db.execAccount(ctx, "delete account", nick, `DELETE FROM accounts WHERE nick = ?`, nick); err != nil {
 		return err
 	}
-	_, _ = db.w.ExecContext(ctx, "VACUUM")
-	_, _ = db.w.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	scrub := context.WithoutCancel(ctx)
+	var errs []error
+	for _, stmt := range []string{"INSERT INTO messages_fts(messages_fts) VALUES('optimize')", "VACUUM"} {
+		if _, err := db.w.ExecContext(scrub, stmt); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := sqlitedb.Checkpoint(scrub, db.w); err != nil {
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%w: %w", ErrNotScrubbed, errors.Join(errs...))
+	}
 	return nil
 }
 

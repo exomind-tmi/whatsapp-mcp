@@ -43,24 +43,22 @@ func (m *Manager) Link(ctx context.Context, req LinkRequest) (LinkTicket, error)
 		}
 		kind, digits = kindPhone, phoneDigits(req.Phone)
 	}
-	outcome, s, err := m.admit(ctx, nick, kind, digits)
+	adm, err := m.admit(ctx, nick, kind, digits)
 	if err != nil {
 		return LinkTicket{}, err
 	}
+	// The link of the add before has been ended, or replaced by the new one, by admit.
 	switch {
-	case outcome == outcomeReconnect:
-		m.nonces.revoke(nick)
+	case adm.outcome == outcomeReconnect:
 		return LinkTicket{Reconnecting: true}, nil
-	case s != nil: // a pairing by code or in the chat has no page, so the link of the add before ends with its own pairing
-		m.nonces.revoke(nick)
+	case adm.sess != nil: // a pairing by code or in the chat has no page
 		if kind == kindChat {
-			return m.issueQR(ctx, nick, s)
+			return m.issueQR(ctx, nick, adm.sess)
 		}
-		return m.issueCode(ctx, nick, s, digits)
+		return m.issueCode(ctx, nick, adm.sess, digits)
 	}
-	n := m.nonces.issue(nick)
 	m.log.Info("login link issued", "account", nick) // never the link itself (plan 10)
-	return LinkTicket{LoginURL: m.baseURL + LoginPath + nick + "?t=" + n.value, ExpiresAt: n.expires}, nil
+	return LinkTicket{LoginURL: m.baseURL + LoginPath + nick + "?t=" + adm.link.value, ExpiresAt: adm.link.expires}, nil
 }
 
 // LoginState is a pairing as the login page shows it.
@@ -135,7 +133,9 @@ func (m *Manager) startLogin(ctx context.Context, nick string, n *loginNonce) er
 		m.nonces.extend(nick, n, m.nonces.now().Add(pairingGrace))
 	case ctx.Err() != nil:
 		return ctx.Err()
-	case errors.Is(err, errNotPageSession): // not this page's: its link ended with the add that began that
+	case errors.Is(err, errNotPageSession), errors.Is(err, ErrNoLogin):
+		// Not this page's: its link ended with the add that began that pairing, or
+		// with the remove that took the account.
 		return ErrNoLogin
 	case err != nil:
 		n.settled = &LoginState{State: string(pairFailed), Reason: m.loginReason(nick, err)}

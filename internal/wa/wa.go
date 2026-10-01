@@ -3,7 +3,6 @@
 package wa
 
 import (
-	"errors"
 	"regexp"
 	"strings"
 	"time"
@@ -54,8 +53,9 @@ type LinkTicket struct {
 	Reconnecting bool // no URL, no image and no code: the existing device connects again
 }
 
+// RemoveResult is what a remove tells besides that the account is gone.
 type RemoveResult struct {
-	Hint string // e.g. "remove the device on the phone manually"
+	Hint string // for the user: the phone may still list the device (removeDeviceHint); "" when it does not
 }
 
 var nickRe = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
@@ -89,6 +89,3 @@ func phoneDigits(s string) string {
 		return -1
 	}, s)
 }
-
-// ErrNotImplemented is returned by operations that arrive in a later step.
-var ErrNotImplemented = errors.New("not implemented yet: removing WhatsApp accounts arrives in a later step of the accounts milestone")

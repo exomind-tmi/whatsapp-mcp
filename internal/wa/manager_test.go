@@ -30,10 +30,12 @@ var errHandshake = errors.New("noise handshake failed: timed out waiting for han
 
 // fakeNet stands in for WhatsApp's servers.
 type fakeNet struct {
-	fails     map[string][]error          // phone: what its Connects return before one succeeds
-	hold      func(cli *whatsmeow.Client) // runs inside Connect, e.g. to block it
-	connected map[string]bool             // phone: whether its socket is up, for Logout
-	logoutErr error                       // what Logout of a connected client returns; on nil it deletes the device, as whatsmeow does
+	fails       map[string][]error          // phone: what its Connects return before one succeeds
+	hold        func(cli *whatsmeow.Client) // runs inside Connect, e.g. to block it
+	connected   map[string]bool             // phone: whether its socket is up, for Logout
+	logoutErr   error                       // what Logout of a connected client returns; on nil it deletes the device, as whatsmeow does
+	logoutHold  func(cli *whatsmeow.Client) // runs first inside Logout, e.g. to block it as the socket lock of a connect that hangs does
+	logoutHangs bool                        // Logout of a connected client waits for its ctx, as the request to a socket that takes no answers does
 
 	firstCode string                      // when set, each QR channel starts with this code, as WhatsApp's first once connected
 	pairCode  string                      // what PairPhone returns; "" for pairCodeOK
@@ -86,6 +88,9 @@ func (f *fakeNet) network(g *waGlobals) network {
 		globals:   g,
 		retryStep: time.Millisecond,
 		connect: func(cli *whatsmeow.Client) error {
+			if cli.Store.Deleted { // as whatsmeow's, before it dials (client.go:548)
+				return store.ErrDeviceDeleted
+			}
 			if f.hold != nil {
 				f.hold(cli)
 			}
@@ -109,6 +114,9 @@ func (f *fakeNet) network(g *waGlobals) network {
 		logout: func(cli *whatsmeow.Client, ctx context.Context) error {
 			phone := phoneOf(cli)
 			f.record("logout " + phone)
+			if f.logoutHold != nil {
+				f.logoutHold(cli)
+			}
 			f.mu.Lock()
 			connected := f.connected[phone]
 			f.mu.Unlock()
@@ -117,6 +125,9 @@ func (f *fakeNet) network(g *waGlobals) network {
 				return whatsmeow.ErrNotLoggedIn
 			case !connected:
 				return whatsmeow.ErrNotConnected
+			case f.logoutHangs:
+				<-ctx.Done()
+				return ctx.Err()
 			case f.logoutErr != nil:
 				return f.logoutErr
 			}

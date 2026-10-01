@@ -23,16 +23,17 @@ const pairedWait = 30 * time.Second
 // (qrchan.go:114-116), so nothing else would end the pairing.
 const qrSilence = 30 * time.Second
 
-// logoutWait bounds the Logout of a relinked account's old device.
-const logoutWait = 10 * time.Second
-
 // oldDeviceHint is for a relink whose old device could not be unlinked.
 const oldDeviceHint = "the old device of this account may still be listed on the phone: remove it in WhatsApp → Linked devices"
 
 const cancelledReason = "linking was cancelled; call add again"
 
-// differentNumberReason is why a relink with another number is refused.
-const differentNumberReason = "this is a different phone number; remove the account and add it again"
+// differentNumberReason is why a relink with another number is refused. It says
+// what removing costs, as the way out of it is a remove, which deletes the archive,
+// and the refusal can be false: the number a JID holds is not always the one a
+// user types (Mexico, Argentina, Brazil), so the user decides, not the agent.
+const differentNumberReason = "this is a different phone number; to use it, remove the account and add it again " +
+	"(removing the account deletes its message archive: ask the user first)"
 
 // The timeouts of the QR codes whatsmeow shows: the first one only when the
 // server sent six refs, else every code gets the shorter one
@@ -514,12 +515,8 @@ func (m *Manager) finishPaired(a *account, s *pairSession) {
 }
 
 // dropOld unlinks a relinked account's old device and deletes its keys; it
-// returns a hint when the phone may still list it. Logout fails at once on
-// a client with no socket (client.go:962-963) or no device ID, and on any
-// failure neither disconnects nor deletes (client.go:723-761); a live
-// client's device goes by Store.Delete, which also stops its use
-// (store/store.go:286-298). If the process dies first, load deletes the
-// device as an orphan, accounts.jid having moved on.
+// returns a hint when the phone may still list it. If the process dies first,
+// load deletes the device as an orphan, accounts.jid having moved on.
 //
 // The policy pairs only accounts in needs_link, whose old device is gone
 // already: whatsmeow deletes it on LoggedOut (connectionevents.go:40-46).
@@ -528,23 +525,12 @@ func (m *Manager) dropOld(a *account, old *whatsmeow.Client) string {
 	if old == nil {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(m.ctx, logoutWait)
-	defer cancel()
-	err := m.net.logout(old, ctx)
-	if err == nil {
-		m.log.Info("old device unlinked", "account", a.nick)
-		return ""
-	}
-	m.net.disconnect(old)
-	// Read after Disconnect, which waits up to 5 s for the client's handler
-	// queue (client.go:713-720); a LoggedOut handled later than that may
-	// still be deleting the device, and then Delete below only logs.
-	if old.Store.Deleted {
-		return "" // on LoggedOut: the phone dropped it first
-	}
-	m.log.Warn("unlink the old device", "account", a.nick, "err", err)
-	if err := old.Store.Delete(m.ctx); err != nil {
+	listed, err := m.unlinkClient(a.nick, old)
+	if err != nil {
 		m.log.Warn("delete the old device; the next start deletes it", "account", a.nick, "err", err)
+	}
+	if err == nil && !listed {
+		return ""
 	}
 	return oldDeviceHint
 }

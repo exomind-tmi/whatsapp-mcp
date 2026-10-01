@@ -18,12 +18,14 @@ import (
 // faster, with the channel's own end.
 const codeWait = 10 * time.Second
 
-// abortWait bounds the wait of a call that gave up its pairing for the pairing
-// to end. A connect in the noise handshake ignores the session's context
-// (client.go:500-502, handshake.go:24, 46-50), so a pairing that hangs there
-// ends only with the connect, after the 20 s of the handshake or a dial's own
-// timeout. The call answers before that, and the session leaves the account,
-// still linking until then, its reason when it does end.
+// abortWait bounds the wait of a call for what it has told to stop to end, the
+// one wait of every path (awaitEnd): a call that gave up its pairing, an add that
+// restarts the pairing of the one before, a remove. A connect in the noise
+// handshake ignores the session's context (client.go:500-502, handshake.go:24,
+// 46-50), so a pairing that hangs there ends only with the connect, after the 20 s
+// of the handshake or a dial's own timeout. The call answers before that, and the
+// session leaves the account, still linking until then, its reason when it does
+// end.
 const abortWait = 3 * time.Second
 
 // couldNotReach is the reason a pairing ends with when no first QR code came in
@@ -80,13 +82,9 @@ func (m *Manager) abort(ctx context.Context, s *pairSession, reason string) erro
 		return errClosing
 	}
 	if s.stopFor(reason) {
-		timer := time.NewTimer(m.abortWait)
-		defer timer.Stop()
-		select {
-		case <-s.done:
-		case <-timer.C:
-		case <-ctx.Done():
-			return ctx.Err()
+		// Still going on after abortWait is no failure here: the call answers anyway.
+		if err := m.awaitEnd(ctx, s.done, errStillFinishing); err != nil && !errors.Is(err, errStillFinishing) {
+			return err
 		}
 	}
 	select {
