@@ -47,7 +47,7 @@ func TestGlobalsWaitForVersion(t *testing.T) {
 
 	// The settings that need no network are in place at once.
 	p := store.DeviceProps
-	if p.GetOs() != deviceName || p.GetPlatformType() != waCompanionReg.DeviceProps_CHROME || !p.GetRequireFullSync() {
+	if p.GetOs() != deviceName() || p.GetPlatformType() != waCompanionReg.DeviceProps_CHROME || !p.GetRequireFullSync() {
 		t.Errorf("DeviceProps: os %q, platform %v, full sync %v", p.GetOs(), p.GetPlatformType(), p.GetRequireFullSync())
 	}
 	if !proto.Equal(p.GetVersion(), osVersion) {
@@ -68,6 +68,22 @@ func TestGlobalsWaitForVersion(t *testing.T) {
 	}
 	if n := calls.Load(); n != 1 {
 		t.Errorf("version fetched %d times, want 1", n)
+	}
+}
+
+func TestDeviceNames(t *testing.T) {
+	for _, tc := range []struct{ goos, device, pairCode string }{
+		{"windows", "Claude (Windows)", "Chrome (Windows)"},
+		{"linux", "Claude (Linux)", "Chrome (Linux)"},
+		{"darwin", "Claude", "Chrome (Linux)"},
+		{"", "Claude", "Chrome (Linux)"},
+	} {
+		if got := deviceNameFor(tc.goos); got != tc.device {
+			t.Errorf("deviceNameFor(%q) = %q, want %q", tc.goos, got, tc.device)
+		}
+		if got := pairCodeNameFor(tc.goos); got != tc.pairCode {
+			t.Errorf("pairCodeNameFor(%q) = %q, want %q", tc.goos, got, tc.pairCode)
+		}
 	}
 }
 

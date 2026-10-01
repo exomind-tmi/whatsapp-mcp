@@ -3,6 +3,7 @@ package wa
 import (
 	"context"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -13,8 +14,40 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// deviceName is the name the phone shows for us under Linked devices.
-const deviceName = "whatsapp-mcp"
+// deviceName is the name the phone shows for us under Linked devices, a
+// default the user can rename on the phone (Anton's decision of 2026-10-01).
+func deviceName() string { return deviceNameFor(runtime.GOOS) }
+
+func deviceNameFor(goos string) string {
+	if name := osName(goos); name != "" {
+		return "Claude (" + name + ")"
+	}
+	return "Claude"
+}
+
+// pairCodeName is the display name for pairing by phone number: the server
+// takes only "Browser (OS)" of common ones and answers 400 otherwise
+// (PairPhone, pair-code.go:88-89); Chrome matches the platform type set in
+// start.
+func pairCodeName() string { return pairCodeNameFor(runtime.GOOS) }
+
+func pairCodeNameFor(goos string) string {
+	if name := osName(goos); name != "" {
+		return "Chrome (" + name + ")"
+	}
+	return "Chrome (Linux)"
+}
+
+// osName is how the phone names goos; "" for one it has no name for.
+func osName(goos string) string {
+	switch goos {
+	case "windows":
+		return "Windows"
+	case "linux":
+		return "Linux"
+	}
+	return ""
+}
 
 // versionTimeout bounds the check of the current WhatsApp Web version
 // (plan 6.2).
@@ -52,7 +85,7 @@ func (g *waGlobals) start(ctx context.Context, log *slog.Logger) {
 		// SetOSInfo sets a version too; whatsmeow's own (0.1.0) is the one
 		// WhatsApp is known to take.
 		v := store.DeviceProps.GetVersion()
-		store.SetOSInfo(deviceName, [3]uint32{v.GetPrimary(), v.GetSecondary(), v.GetTertiary()})
+		store.SetOSInfo(deviceName(), [3]uint32{v.GetPrimary(), v.GetSecondary(), v.GetTertiary()})
 		store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 		// Travels only in the registration payload (clientpayload.go:168-188),
 		// so it holds for accounts linked from now on and cannot be changed

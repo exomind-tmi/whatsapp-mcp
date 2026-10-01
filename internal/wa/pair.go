@@ -189,32 +189,64 @@ func (m *Manager) newPairing(a *account) (*pairSession, error) {
 // prePair returns the PrePairCallback of a's pairing, which whatsmeow calls
 // before it saves the new device (pair.go:204 vs 226): the account is bound
 // to its device here, so a crash leaves no device without one (see load).
-// A relink must keep the account's number; the archive is keyed by nick.
+// A relink must keep the account's number; the archive is keyed by nick. A
+// number belongs to one account (Anton's decision of 2026-10-01).
 func (m *Manager) prePair(a *account, s *pairSession) func(types.JID, string, string) bool {
 	return func(jid types.JID, _, _ string) bool {
-		m.mu.Lock()
-		bound := a.phone
-		m.mu.Unlock()
-		if bound != "" && bound != jid.User {
-			m.log.Warn("linking refused: a different phone number", "account", a.nick)
-			s.refuse("this is a different phone number; remove the account and add it again")
+		prev, refusal := m.claimPhone(a, jid.User)
+		if refusal != "" {
+			s.refuse(refusal)
 			return false
 		}
 		if !s.bind() {
+			m.releasePhone(a, prev)
 			s.refuse(cancelledReason)
 			return false
 		}
 		if err := m.db.SetAccountJID(s.ctx, a.nick, jid.String()); err != nil {
 			s.unbind()
+			m.releasePhone(a, prev)
 			m.log.Error("record the linked device", "account", a.nick, "err", err)
 			s.refuse("could not record the linked device; call add again")
 			return false
 		}
 		m.mu.Lock()
-		a.phone, a.info.Phone = jid.User, "+"+jid.User
+		a.info.Phone = "+" + jid.User
 		m.mu.Unlock()
 		return true
 	}
+}
+
+// claimPhone checks that a may take the number user and records it as a's,
+// in one hold of mu: pairings of two accounts run side by side, and when
+// both scan the same phone the second callback must see the first's claim.
+// It returns a's previous number for releasePhone, or the reason it
+// refuses. The accounts' numbers are those of load, also of
+// accounts that have no keys on this computer.
+func (m *Manager) claimPhone(a *account, user string) (prev, refusal string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prev = a.phone
+	if prev != "" && prev != user {
+		m.log.Warn("linking refused: a different phone number", "account", a.nick)
+		return prev, "this is a different phone number; remove the account and add it again"
+	}
+	for nick, other := range m.accounts {
+		if other != a && user != "" && other.phone == user {
+			m.log.Warn("linking refused: the number is linked to another account", "account", a.nick, "other", nick)
+			return prev, fmt.Sprintf("this number is already linked as account %q", nick)
+		}
+	}
+	a.phone = user
+	return prev, ""
+}
+
+// releasePhone gives back what claimPhone recorded, when the device is not
+// taken after all.
+func (m *Manager) releasePhone(a *account, prev string) {
+	m.mu.Lock()
+	a.phone = prev
+	m.mu.Unlock()
 }
 
 // pairEnd is how reading the QR channel ended.

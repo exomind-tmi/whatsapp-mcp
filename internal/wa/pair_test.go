@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -388,6 +389,282 @@ func TestPrePairCallback(t *testing.T) {
 			}
 			if got := accountJID(t, f, "personal"); got != before {
 				t.Errorf("accounts.jid = %q, want the old %q", got, before)
+			}
+		})
+	}
+}
+
+// TestPrePairCallbackOneNumberOneAccount: a number is linked under one nick
+// only; the refusal names the account that has it.
+func TestPrePairCallbackOneNumberOneAccount(t *testing.T) {
+	const phone, other = "70000000001", "70000000002"
+	for _, tc := range []struct {
+		name    string
+		accs    map[string]string // nick: accounts.jid's phone of the other accounts
+		keys    bool              // the other accounts have devices in store.db
+		bound   string            // the pairing account's number
+		scanned string
+		refusal string // "" if accepted
+	}{
+		{name: "same nick, same number", bound: phone, scanned: phone},
+		{name: "other nick, same number", accs: map[string]string{"work": phone}, scanned: phone,
+			refusal: `this number is already linked as account "work"`},
+		{name: "other nick with keys, same number", accs: map[string]string{"work": phone}, keys: true, scanned: phone,
+			refusal: `this number is already linked as account "work"`},
+		{name: "other nick, different number", accs: map[string]string{"work": other}, scanned: phone},
+		{name: "relink with the number of another", accs: map[string]string{"work": other}, bound: phone, scanned: other,
+			refusal: "this is a different phone number; remove the account and add it again"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			if tc.bound != "" {
+				f.account(t, "personal", tc.bound)
+			}
+			devs := map[string]string{}
+			for nick, p := range tc.accs {
+				f.account(t, nick, p)
+				devs[p] = ""
+			}
+			if tc.keys {
+				f.devices(t, devs)
+			}
+			fn := &fakeNet{}
+			m := f.start(t, fn.network(readyGlobals()))
+			m.wg.Wait()
+			before := ""
+			if tc.bound != "" {
+				before = accountJID(t, f, "personal")
+			}
+			s := pair(t, m, "personal")
+			q := fn.qr(t, 0)
+			q.ch <- code("2@a", time.Minute)
+			jid := types.NewADJID(tc.scanned, 0, 13)
+			if got := scan(t, q, jid); got != (tc.refusal == "") {
+				t.Fatalf("PrePairCallback = %v, want %v", got, tc.refusal == "")
+			}
+			if tc.refusal == "" {
+				eventually(t, "paired", stateIs(s, pairPaired))
+				if got := accountJID(t, f, "personal"); got != jid.String() {
+					t.Errorf("accounts.jid = %q, want %q", got, jid)
+				}
+				q.cli.DangerousInternals().DispatchEvent(&events.Connected{})
+				<-s.done
+				return
+			}
+			<-s.done
+			if got := s.status(); got.State != pairFailed || got.Reason != tc.refusal {
+				t.Errorf("session %+v, want failed: %s", got, tc.refusal)
+			}
+			if got := infoOf(m, "personal"); got.Status != StatusNeedsLink || got.Reason != tc.refusal || got.Phone != "" {
+				t.Errorf("account %+v", got)
+			}
+			if got := accountJID(t, f, "personal"); got != before {
+				t.Errorf("accounts.jid = %q, want the old %q", got, before)
+			}
+			m.mu.Lock()
+			if got := m.accounts["personal"].phone; got != tc.bound {
+				t.Errorf("the refused pairing left the number %q, want %q", got, tc.bound)
+			}
+			m.mu.Unlock()
+		})
+	}
+}
+
+// TestPrePairCallbackConcurrent: two accounts whose pairings scan the same
+// phone at once; exactly one gets it, whichever callback comes first.
+func TestPrePairCallbackConcurrent(t *testing.T) {
+	jid := types.NewADJID("70000000001", 0, 13)
+	for round := range 20 {
+		f := newFixture(t)
+		fn := &fakeNet{}
+		m := f.start(t, fn.network(readyGlobals()))
+		sa, sb := pair(t, m, "a"), pair(t, m, "b")
+		var qs [2]fakeQR
+		for i := range qs {
+			qs[i] = fn.qr(t, i)
+			qs[i].ch <- code("2@a", time.Minute)
+		}
+		var accepted [2]bool
+		var ready, wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := range qs {
+			ready.Add(1)
+			wg.Go(func() {
+				ready.Done()
+				<-start
+				accepted[i] = qs[i].cli.PrePairCallback(jid, "android", "")
+			})
+		}
+		ready.Wait()
+		close(start)
+		wg.Wait()
+		if accepted[0] == accepted[1] {
+			t.Fatalf("round %d: accepted %v, want exactly one", round, accepted)
+		}
+		// End both pairings: the winner's device is saved, the loser's is refused.
+		winner, loser := 0, 1
+		if accepted[1] {
+			winner, loser = 1, 0
+		}
+		saveDevice(t, qs[winner].cli.Store, jid)
+		qs[winner].ch <- whatsmeow.QRChannelSuccess
+		qs[loser].ch <- whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventError, Error: whatsmeow.ErrPairRejectedLocally}
+		sessions := [2]*pairSession{sa, sb}
+		eventually(t, "paired", stateIs(sessions[winner], pairPaired))
+		qs[winner].cli.DangerousInternals().DispatchEvent(&events.Connected{})
+		<-sessions[winner].done
+		<-sessions[loser].done
+		nicks := [2]string{"a", "b"}
+		if got := accountJID(t, f, nicks[winner]); got != jid.String() {
+			t.Errorf("round %d: winner's accounts.jid = %q", round, got)
+		}
+		if got := accountJID(t, f, nicks[loser]); got != "" {
+			t.Errorf("round %d: loser's accounts.jid = %q", round, got)
+		}
+		want := `this number is already linked as account "` + nicks[winner] + `"`
+		if got := sessions[loser].status(); got.Reason != want {
+			t.Errorf("round %d: loser's session %+v, want %s", round, got, want)
+		}
+	}
+}
+
+// differentNumber is the refusal of a relink with another number.
+const differentNumber = "this is a different phone number; remove the account and add it again"
+
+// numberOf is the number the manager holds for nick.
+func numberOf(m *Manager, nick string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.accounts[nick].phone
+}
+
+// requireRelinkKeepsNumber: the account nick, which had the number bound before
+// a failed pairing, still has it, so the pairing of another number is refused.
+func requireRelinkKeepsNumber(t *testing.T, m *Manager, fn *fakeNet, nick, bound string) {
+	t.Helper()
+	if got := numberOf(m, nick); got != bound {
+		t.Fatalf("number %q after the failed pairing, want %q", got, bound)
+	}
+	s := pair(t, m, nick)
+	q := fn.qr(t, 1)
+	q.ch <- code("2@a", time.Minute)
+	if scan(t, q, types.NewADJID("70000000009", 0, 13)) {
+		t.Fatal("a relink with another number was taken")
+	}
+	<-s.done
+	if got := s.status(); got.Reason != differentNumber {
+		t.Errorf("session %+v, want failed: %s", got, differentNumber)
+	}
+}
+
+// TestPrePairCallbackCancelledReleasesNumber: a pairing refused as cancelled
+// does not keep the number it tried to take, and gives an account its old one
+// back.
+func TestPrePairCallbackCancelledReleasesNumber(t *testing.T) {
+	const phone = "70000000001"
+	jid := types.NewADJID(phone, 0, 13)
+	t.Run("new account", func(t *testing.T) {
+		f := newFixture(t)
+		fn := &fakeNet{}
+		m := f.start(t, fn.network(readyGlobals()))
+		sa := pair(t, m, "a")
+		if !sa.stop() {
+			t.Fatal("stop of an open pairing returned false")
+		}
+		<-sa.done
+		if fn.qr(t, 0).cli.PrePairCallback(jid, "android", "") {
+			t.Fatal("a cancelled pairing took a device")
+		}
+		sb := pair(t, m, "b")
+		q := fn.qr(t, 1)
+		q.ch <- code("2@a", time.Minute)
+		if !scan(t, q, jid) {
+			t.Fatalf("the number is still held by the cancelled pairing: %q", sb.refused())
+		}
+		eventually(t, "paired", stateIs(sb, pairPaired))
+		q.cli.DangerousInternals().DispatchEvent(&events.Connected{})
+		<-sb.done
+	})
+	t.Run("relink", func(t *testing.T) {
+		f := newFixture(t)
+		f.account(t, "a", phone)
+		fn := &fakeNet{}
+		m := f.start(t, fn.network(readyGlobals()))
+		sa := pair(t, m, "a")
+		if !sa.stop() {
+			t.Fatal("stop of an open pairing returned false")
+		}
+		<-sa.done
+		if fn.qr(t, 0).cli.PrePairCallback(jid, "android", "") {
+			t.Fatal("a cancelled pairing took a device")
+		}
+		requireRelinkKeepsNumber(t, m, fn, "a", phone)
+	})
+}
+
+// TestPrePairCallbackRecordFails: a device whose accounts.jid cannot be
+// written is refused, and the pairing keeps neither the number nor the bind;
+// a relinked account keeps its old number.
+func TestPrePairCallbackRecordFails(t *testing.T) {
+	const phone = "70000000001"
+	for _, bound := range []string{"", phone} {
+		t.Run("bound "+bound, func(t *testing.T) {
+			f := newFixture(t)
+			if bound != "" {
+				f.account(t, "fresh", bound)
+			}
+			fn := &fakeNet{}
+			m := f.start(t, fn.network(readyGlobals()))
+			s := pair(t, m, "fresh")
+			q := fn.qr(t, 0)
+			q.ch <- code("2@a", time.Minute)
+			eventually(t, "the code", stateIs(s, pairCode))
+			if err := f.db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if q.cli.PrePairCallback(types.NewADJID(phone, 0, 13), "android", "") {
+				t.Fatal("PrePairCallback took a device it could not record")
+			}
+			if got := s.refused(); !strings.Contains(got, "could not record") {
+				t.Errorf("refusal %q", got)
+			}
+			if got := numberOf(m, "fresh"); got != bound || s.phase() != pairingOpen {
+				t.Errorf("number %q, phase %v; want %q and open", got, s.phase(), bound)
+			}
+			q.ch <- whatsmeow.QRChannelItem{Event: whatsmeow.QRChannelEventError, Error: whatsmeow.ErrPairRejectedLocally}
+			<-s.done
+		})
+	}
+}
+
+// TestPairSessionStop: stop cancels a session that has taken no device and
+// never one that has (addPolicy refuses a bound session before stop, so
+// only this test holds the guard).
+func TestPairSessionStop(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bind      bool
+		stopped   bool
+		cancelled bool
+	}{
+		{"open", false, true, true},
+		{"bound", true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s := &pairSession{ctx: ctx, cancel: cancel}
+			if tc.bind && !s.bind() {
+				t.Fatal("bind of an open session failed")
+			}
+			if got := s.stop(); got != tc.stopped {
+				t.Errorf("stop() = %v, want %v", got, tc.stopped)
+			}
+			if got := ctx.Err() != nil; got != tc.cancelled {
+				t.Errorf("session ctx cancelled = %v, want %v", got, tc.cancelled)
+			}
+			if got := s.bind(); got == tc.cancelled {
+				t.Errorf("bind after stop() = %v, want %v", got, !tc.cancelled)
 			}
 		})
 	}
