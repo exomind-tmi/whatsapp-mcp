@@ -81,8 +81,10 @@ EOF
 } >THIRD_PARTY_NOTICES.md
 
 rm -rf dist/licenses
+# --ignore: we are GPL ourselves, and save copies the source of GPL modules, so
+# it would copy the repository, dist/ included, into dist/ without end.
 for os in windows linux; do
-  GOOS=$os $golicenses save ./cmd/whatsapp-mcp --save_path "dist/licenses-$os" --force 2>/dev/null || true
+  GOOS=$os $golicenses save ./cmd/whatsapp-mcp --save_path "dist/licenses-$os" --ignore "$self" --force 2>/dev/null || true
 done
 mkdir -p dist/licenses/golang.org/go
 for d in dist/licenses-windows dist/licenses-linux; do
