@@ -26,6 +26,7 @@ their full license texts as `whatsapp-mcp_<version>_licenses.zip`.
 | [github.com/rs/zerolog](https://pkg.go.dev/github.com/rs/zerolog@v1.35.1?tab=licenses) | v1.35.1 | MIT |
 | [github.com/segmentio/asm](https://pkg.go.dev/github.com/segmentio/asm@v1.1.3?tab=licenses) | v1.1.3 | MIT |
 | [github.com/segmentio/encoding](https://pkg.go.dev/github.com/segmentio/encoding@v0.5.4?tab=licenses) | v0.5.4 | MIT |
+| [github.com/skip2/go-qrcode](https://pkg.go.dev/github.com/skip2/go-qrcode@v0.0.0-20200617195104-da1b6568686e?tab=licenses) | v0.0.0-20200617195104-da1b6568686e | MIT |
 | [github.com/vektah/gqlparser/v2/ast](https://pkg.go.dev/github.com/vektah/gqlparser/v2@v2.5.27?tab=licenses) | v2.5.27 | MIT |
 | [github.com/yosida95/uritemplate/v3](https://pkg.go.dev/github.com/yosida95/uritemplate/v3@v3.0.2?tab=licenses) | v3.0.2 | BSD-3-Clause |
 | [go.mau.fi/libsignal](https://pkg.go.dev/go.mau.fi/libsignal@v0.2.2?tab=licenses) | v0.2.2 | GPL-3.0 |

@@ -79,13 +79,43 @@ func addPolicy(info AccountInfo, device bool, pairing pairingPhase, now time.Tim
 
 var errClosing = errors.New("whatsapp-mcp is shutting down")
 
-// add is the core of the add tool for nick: it refuses with the reason as
-// the error, reconnects the account's device and returns no pairing, or
-// starts a pairing and returns it. Each decision is taken, and acted on,
-// under one hold of mu, so a status that moves while a pairing is cancelled
-// or built is decided again. Waiting for a cancelled pairing to end, which
-// may take a noise handshake (up to 20 s, handshake.go:24), stops with ctx.
+// refusal is an add that the policy refuses: its text is for the user, unlike
+// that of the errors that come from the database or the network.
+type refusal string
+
+func (r refusal) Error() string { return string(r) }
+
+// addOutcome is what admit did for an account that was not refused.
+type addOutcome int
+
+const (
+	outcomePair      addOutcome = iota + 1 // the account needs a new pairing (not 0: an error return is no outcome)
+	outcomeReconnect                       // its device is connecting again, with the existing keys
+)
+
+// add starts the pairing of nick, as the login page does when it first polls
+// (plan 6.3): the session, or nil if the decision turned out to be a
+// reconnect. See admit.
 func (m *Manager) add(ctx context.Context, nick string) (*pairSession, error) {
+	_, s, err := m.admit(ctx, nick, true)
+	return s, err
+}
+
+// admit is the core of the add tool for nick: it refuses with the reason as
+// the error, reconnects the account's device, or finds that the account
+// needs a pairing and, with start, starts it and returns the session. The
+// add tool itself passes false: its pairing starts only when the login page
+// polls, so an unopened link costs no session. The account exists from
+// the first call on. Each decision is taken, and acted on, under one hold of
+// mu, so a status that moves while a pairing is cancelled or built is
+// decided again. Waiting for a cancelled pairing to end, which may take a
+// noise handshake (up to 20 s, handshake.go:24), stops with ctx.
+//
+// The add tool (start false) and the login page (start true) each decide for
+// themselves, and the page's answer is the one the user sees: a status that
+// moved in between, say the account got linked, shows there as a failed or a
+// reconnecting login, never as a second pairing.
+func (m *Manager) admit(ctx context.Context, nick string, start bool) (addOutcome, *pairSession, error) {
 	m.mu.Lock()
 	_, known := m.accounts[nick]
 	m.mu.Unlock()
@@ -93,16 +123,16 @@ func (m *Manager) add(ctx context.Context, nick string) (*pairSession, error) {
 		// The account exists from now on: a pairing that fails leaves it
 		// needs_link, "not linked yet" after a restart.
 		if err := m.db.AddAccount(ctx, nick); err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 	}
-	var s *pairSession // built on the first pair decision
+	var s *pairSession // built on the first pair decision, with start
 	for {
 		m.mu.Lock()
 		if m.closed {
 			m.mu.Unlock()
 			s.drop()
-			return nil, errClosing
+			return 0, nil, errClosing
 		}
 		a := m.accounts[nick]
 		if a == nil {
@@ -116,6 +146,10 @@ func (m *Manager) add(ctx context.Context, nick string) (*pairSession, error) {
 		d := addPolicy(a.info, a.cli != nil, phase, time.Now())
 		switch d.action {
 		case addPair:
+			if !start {
+				m.mu.Unlock()
+				return outcomePair, nil, nil
+			}
 			if s != nil {
 				m.wg.Add(1) // under mu and not closed, as track does
 				a.sess, a.pcli = s, s.cli
@@ -123,13 +157,13 @@ func (m *Manager) add(ctx context.Context, nick string) (*pairSession, error) {
 				m.mu.Unlock()
 				m.log.Info("linking started", "account", nick)
 				go m.runPairing(a, s)
-				return s, nil
+				return outcomePair, s, nil
 			}
 			m.mu.Unlock()
 			s.drop()
 			var err error
 			if s, err = m.newPairing(a); err != nil {
-				return nil, err
+				return 0, nil, err
 			}
 		case addRestart:
 			prev := a.sess
@@ -141,7 +175,7 @@ func (m *Manager) add(ctx context.Context, nick string) (*pairSession, error) {
 				case <-prev.done:
 				case <-ctx.Done():
 					s.drop()
-					return nil, ctx.Err()
+					return 0, nil, ctx.Err()
 				}
 			}
 		case addReconnect:
@@ -152,11 +186,11 @@ func (m *Manager) add(ctx context.Context, nick string) (*pairSession, error) {
 			s.drop()
 			m.log.Info("reconnecting the account with its existing device", "account", nick)
 			m.connect(a, cli)
-			return nil, nil
+			return outcomeReconnect, nil, nil
 		default:
 			m.mu.Unlock()
 			s.drop()
-			return nil, errors.New(d.reason)
+			return 0, nil, refusal(d.reason)
 		}
 	}
 }

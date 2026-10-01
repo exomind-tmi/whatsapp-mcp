@@ -116,8 +116,11 @@ func run(ctx context.Context, h home.Home, version string, log *slog.Logger) err
 			server:  tools.NewServer(version, tools.Deps{WA: accounts}),
 			stop:    stop,
 			log:     log,
+			login:   accounts,
+			port:    port,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute, // /login/ is open to any local process: idle connections must not pile up
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()

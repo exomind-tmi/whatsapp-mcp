@@ -953,3 +953,18 @@ func TestRelinkCrashLeavesOrphan(t *testing.T) {
 		t.Errorf("the account uses %v, want %v", got, newJID)
 	}
 }
+
+// pairing returns the state of nick's latest pairing; false if there was
+// none since the daemon started.
+func (m *Manager) pairing(nick string) (pairStatus, bool) {
+	m.mu.Lock()
+	var s *pairSession
+	if a := m.accounts[nick]; a != nil {
+		s = a.sess
+	}
+	m.mu.Unlock()
+	if s == nil {
+		return pairStatus{}, false
+	}
+	return s.status(), true
+}

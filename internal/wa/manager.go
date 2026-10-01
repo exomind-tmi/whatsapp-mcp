@@ -66,6 +66,7 @@ type Manager struct {
 	db         *archive.DB
 	store      *sqlstore.Container
 	baseURL    string
+	nonces     *loginNonces
 	net        network
 	closeWait  time.Duration
 	pairedWait time.Duration
@@ -130,6 +131,7 @@ func newManager(ctx context.Context, cfg Config, net network) (*Manager, error) 
 		db:         cfg.Archive,
 		store:      st,
 		baseURL:    cfg.BaseURL,
+		nonces:     newLoginNonces(),
 		net:        net,
 		closeWait:  closeWait,
 		pairedWait: pairedWait,
@@ -354,10 +356,6 @@ func (m *Manager) Accounts(ctx context.Context) []AccountInfo {
 	m.mu.Unlock()
 	slices.SortFunc(out, func(a, b AccountInfo) int { return strings.Compare(a.Nick, b.Nick) })
 	return out
-}
-
-func (*Manager) Link(context.Context, string, string) (LinkTicket, error) {
-	return LinkTicket{}, ErrNotImplemented
 }
 
 func (*Manager) Remove(context.Context, string) (RemoveResult, error) {

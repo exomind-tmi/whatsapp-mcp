@@ -100,11 +100,17 @@ func TestShimForwardsToDaemon(t *testing.T) {
 		t.Error("structuredContent lost in forwarding")
 	}
 
-	for _, action := range []string{"add", "remove"} {
-		res, text = callText(t, cs, "manage-accounts", map[string]any{"action": action, "account_id": "personal"})
-		if !res.IsError || !strings.Contains(text, "not implemented until M1") {
-			t.Fatalf("%s: isError lost in forwarding: %v %s", action, res.IsError, text)
-		}
+	// add answers with a link; the page is not opened, as that would start a
+	// pairing on the real network.
+	res, text = callText(t, cs, "manage-accounts", map[string]any{"action": "add", "account_id": "personal"})
+	if res.IsError || !strings.Contains(text, `"login_url":"http://127.0.0.1:`) {
+		t.Fatalf("add via daemon: isError=%v %s", res.IsError, text)
+	}
+	// remove is not implemented yet, which is also how an isError result is
+	// seen to survive the forwarding.
+	res, text = callText(t, cs, "manage-accounts", map[string]any{"action": "remove", "account_id": "personal"})
+	if !res.IsError || !strings.Contains(text, "not implemented yet") {
+		t.Fatalf("remove: isError lost in forwarding: %v %s", res.IsError, text)
 	}
 }
 

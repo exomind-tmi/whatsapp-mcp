@@ -2,10 +2,13 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/exomind-tmi/whatsapp-mcp/internal/client"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/testutil"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/tools"
@@ -148,6 +154,106 @@ func TestRunLifecycle(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(h.Dir, db)); err != nil {
 			t.Fatalf("%s not created: %v", db, err)
 		}
+	}
+}
+
+// TestRunIssuesLoginLink: the add tool of the real daemon hands out a link
+// to its own port, and the mux answers the link's path with no token. The
+// page opens, but its poll is not made: that would start a pairing on the
+// real network.
+func TestRunIssuesLoginLink(t *testing.T) {
+	h := home.Home{Dir: testutil.TempDir(t)}
+	if err := h.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, h, "v0.1.0") }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	var info home.DaemonInfo
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		var err error
+		if info, err = h.ReadDaemonInfo(); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon.json not written")
+		}
+	}
+
+	cs, err := client.Connect(ctx, h, info.Port, "v0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	call := func(args map[string]any) tools.ManageOut {
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "manage-accounts", Arguments: args})
+		if err != nil || res.IsError {
+			t.Fatalf("manage-accounts %v: %v %v", args, err, res)
+		}
+		var out tools.ManageOut
+		if err := json.Unmarshal([]byte(tools.ResultText(res)), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	out := call(map[string]any{"action": "add", "account_id": "fresh"})
+	u, err := url.Parse(out.LoginURL)
+	if err != nil || out.Status != "linking" {
+		t.Fatalf("add = %+v, %v", out, err)
+	}
+	nonce := u.Query().Get("t")
+	if u.Scheme != "http" || u.Host != fmt.Sprintf("127.0.0.1:%d", info.Port) || u.Path != "/login/fresh" || len(nonce) != 22 {
+		t.Errorf("login URL %q: want the daemon's own port and a 128-bit nonce", out.LoginURL)
+	}
+	if acc := call(map[string]any{"action": "list"}).Accounts; len(acc) != 1 || acc[0].AccountID != "fresh" || acc[0].Status != "needs_link" {
+		t.Errorf("accounts after add: %+v", acc)
+	}
+
+	// Under /login/ the mux asks for no token but a valid nonce on our own
+	// Host, with which the page opens (and starts no pairing: only its poll
+	// does, which this test leaves out as it would reach the real network);
+	// neither a wrong nonce nor another Host gets in.
+	for _, host := range []string{"", fmt.Sprintf("localhost:%d", info.Port)} {
+		req, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/login/fresh?t=%s", info.Port, nonce), nil)
+		if host != "" {
+			req.Host = host
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("the page of the issued link, Host %q: %d, want 200", host, resp.StatusCode)
+		}
+	}
+	for _, tc := range []struct{ path, host string }{
+		{"/login/fresh?t=wrong", ""},
+		{"/login/fresh?t=" + nonce, "evil.example"},
+		{"/login/fresh/state?t=" + nonce, "evil.example"},
+	} {
+		req, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d%s", info.Port, tc.path), nil)
+		if tc.host != "" {
+			req.Host = tc.host
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s with Host %q: %d, want 404", tc.path, tc.host, resp.StatusCode)
+		}
+	}
+	if acc := call(map[string]any{"action": "list"}).Accounts; acc[0].Status != "needs_link" {
+		t.Errorf("a request started the pairing: %+v", acc)
 	}
 }
 

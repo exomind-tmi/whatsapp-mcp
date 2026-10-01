@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -11,10 +12,10 @@ import (
 )
 
 const manageAccountsDescription = "Manage linked WhatsApp accounts.\n" +
-	"- `list` — accounts with status (`connected`, `reconnecting`, `needs_link`, `replaced`, `client_outdated`) and archive size.\n" +
-	"- `add` — link a NEW account, or RE-LINK an existing one: call `add` with the SAME `account_id`. " +
-	"Re-linking keeps the whole message archive. Use it when status is `needs_link` or `replaced`, or after the device was removed on the phone. " +
-	"Without `phone` returns a local page with a QR code; with `phone` returns an 8-character pairing code to enter on the phone.\n" +
+	"- `list` — accounts with status (`connected`, `reconnecting`, `needs_link`, `replaced`, `client_outdated`, `error`) and archive size.\n" +
+	"- `add` — link a NEW account, or RE-LINK an existing one: call `add` with the SAME `account_id`. Re-linking keeps the whole message archive. " +
+	"Use it when status is `needs_link` or the device was removed on the phone (new link: without `phone` a local QR page, with `phone` an 8-character pairing code), " +
+	"or when status is `replaced`/`error` (reconnects with the existing keys, no QR).\n" +
 	"- `remove` — FORGET the account: unlinks the device AND PERMANENTLY DELETES this account's message archive from this computer. " +
 	"Downloaded files are kept. To reconnect a broken account, do NOT use remove; use `add` with the same `account_id`."
 
@@ -68,13 +69,7 @@ func (d Deps) manageAccounts(ctx context.Context, _ *mcp.CallToolRequest, in man
 		if err != nil {
 			return nil, ManageOut{}, err
 		}
-		out := ManageOut{Status: string(wa.StatusLinking), LoginURL: t.LoginURL, PairCode: t.PairCode, ExpiresAt: isoTime(t.ExpiresAt)}
-		if t.PairCode != "" {
-			out.NextStep = "WhatsApp on the phone → Linked devices → Link with phone number, enter the code"
-		} else {
-			out.NextStep = "open the link and scan the QR code in WhatsApp → Linked devices"
-		}
-		return nil, out, nil
+		return nil, linkOut(t), nil
 	case "remove":
 		r, err := d.WA.Remove(ctx, in.AccountID)
 		if err != nil {
@@ -87,10 +82,58 @@ func (d Deps) manageAccounts(ctx context.Context, _ *mcp.CallToolRequest, in man
 	return nil, ManageOut{}, fmt.Errorf("unknown action %q: use list, add or remove", in.Action)
 }
 
+// linkOut renders the three outcomes of add: a QR page to open, a pairing
+// code to type on the phone, or a reconnect with the keys the account has.
+func linkOut(t wa.LinkTicket) ManageOut {
+	switch {
+	case t.Reconnecting:
+		return ManageOut{
+			Status:   string(wa.StatusReconnecting),
+			NextStep: "reconnecting with the existing keys, no QR: check manage-accounts action=list in a few seconds",
+		}
+	case t.PairCode != "":
+		return ManageOut{
+			Status:    string(wa.StatusLinking),
+			PairCode:  t.PairCode,
+			ExpiresAt: isoTime(t.ExpiresAt),
+			NextStep:  "WhatsApp on the phone → Linked devices → Link with phone number, enter the code",
+		}
+	}
+	return ManageOut{
+		Status:    string(wa.StatusLinking),
+		LoginURL:  t.LoginURL,
+		ExpiresAt: isoTime(t.ExpiresAt),
+		NextStep:  "open the link and scan the QR code in WhatsApp → Linked devices",
+	}
+}
+
+// repairStep is the next_step an account's status calls for, or "" when
+// add cannot help: a ban that has not ended is refused by add, and an
+// outdated client needs a new build instead.
+func repairStep(a wa.AccountInfo, now time.Time) string {
+	call := "manage-accounts action=add account_id=" + a.Nick
+	switch a.Status {
+	case wa.StatusNeedsLink:
+		return call + " — re-link, the message archive is kept"
+	case wa.StatusReplaced:
+		return call + " — reconnect without QR"
+	case wa.StatusError:
+		if a.ExpiresAt.IsZero() || !now.Before(a.ExpiresAt) {
+			return call + " — reconnect without QR"
+		}
+	}
+	return ""
+}
+
 func (d Deps) listAccounts(ctx context.Context) ManageOut {
 	accs := d.WA.Accounts(ctx)
 	out := ManageOut{Accounts: make([]AccountOut, 0, len(accs))}
+	var steps []string
+	now := time.Now()
 	for _, a := range accs {
+		if s := repairStep(a, now); s != "" {
+			steps = append(steps, s)
+		}
 		out.Accounts = append(out.Accounts, AccountOut{
 			AccountID: a.Nick,
 			Status:    string(a.Status),
@@ -102,6 +145,7 @@ func (d Deps) listAccounts(ctx context.Context) ManageOut {
 			Messages:  a.Messages,
 		})
 	}
+	out.NextStep = strings.Join(steps, "; ")
 	if len(accs) == 0 {
 		out.NextStep = "no accounts linked yet: call manage-accounts action=add account_id=<nickname>"
 	}

@@ -65,8 +65,21 @@ func TestManageAccountsSchema(t *testing.T) {
 		t.Fatalf("tools = %+v", list.Tools)
 	}
 	tool := list.Tools[0]
-	if tool.Description != manageAccountsDescription || !strings.Contains(tool.Description, "PERMANENTLY DELETES") {
-		t.Error("description differs from plan 5.3")
+	if tool.Description != manageAccountsDescription {
+		t.Error("the listed description differs from the one in the code")
+	}
+	// The scenarios plan 5.3 wants visible from the description alone.
+	for _, want := range []string{
+		"(`connected`, `reconnecting`, `needs_link`, `replaced`, `client_outdated`, `error`)",
+		"call `add` with the SAME `account_id`. Re-linking keeps the whole message archive.",
+		"when status is `needs_link` or the device was removed on the phone (new link: without `phone` a local QR page, with `phone` an 8-character pairing code)",
+		"or when status is `replaced`/`error` (reconnects with the existing keys, no QR).",
+		"FORGET the account: unlinks the device AND PERMANENTLY DELETES this account's message archive from this computer. Downloaded files are kept.",
+		"To reconnect a broken account, do NOT use remove; use `add` with the same `account_id`.",
+	} {
+		if !strings.Contains(tool.Description, want) {
+			t.Errorf("description lacks %q (plan 5.3)", want)
+		}
 	}
 	b, _ := json.Marshal(tool.InputSchema)
 	var schema struct {
@@ -172,7 +185,44 @@ func TestManageAccountsList(t *testing.T) {
 	}
 }
 
-// TestManageAccountsAddRemoveOutput pins the JSON the client sees and what
+// TestManageAccountsListNextStep: a problem status carries the call that
+// fixes it, with what that call does (plan 5.3); the others carry nothing.
+func TestManageAccountsListNextStep(t *testing.T) {
+	banned := time.Now().Add(time.Hour)
+	for _, tc := range []struct {
+		name string
+		accs []wa.AccountInfo
+		want string
+	}{
+		{"healthy", []wa.AccountInfo{{Nick: "a", Status: wa.StatusConnected}, {Nick: "b", Status: wa.StatusReconnecting}, {Nick: "c", Status: wa.StatusLinking}}, ""},
+		{"needs_link", []wa.AccountInfo{{Nick: "a", Status: wa.StatusNeedsLink}},
+			"manage-accounts action=add account_id=a — re-link, the message archive is kept"},
+		{"replaced", []wa.AccountInfo{{Nick: "a", Status: wa.StatusReplaced}},
+			"manage-accounts action=add account_id=a — reconnect without QR"},
+		{"error", []wa.AccountInfo{{Nick: "a", Status: wa.StatusError, Reason: "connect failure"}},
+			"manage-accounts action=add account_id=a — reconnect without QR"},
+		{"ban over", []wa.AccountInfo{{Nick: "a", Status: wa.StatusError, ExpiresAt: time.Now().Add(-time.Minute)}},
+			"manage-accounts action=add account_id=a — reconnect without QR"},
+		{"banned", []wa.AccountInfo{{Nick: "a", Status: wa.StatusError, ExpiresAt: banned}}, ""},
+		{"client_outdated", []wa.AccountInfo{{Nick: "a", Status: wa.StatusClientOutdated}}, ""},
+		{"several", []wa.AccountInfo{
+			{Nick: "a", Status: wa.StatusNeedsLink}, {Nick: "b", Status: wa.StatusConnected}, {Nick: "c", Status: wa.StatusReplaced}},
+			"manage-accounts action=add account_id=a — re-link, the message archive is kept; manage-accounts action=add account_id=c — reconnect without QR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, text := call(t, connect(t, &toolstest.WA{Accs: tc.accs}), map[string]any{"action": "list"})
+			var out ManageOut
+			if err := json.Unmarshal([]byte(text), &out); err != nil {
+				t.Fatal(err)
+			}
+			if out.NextStep != tc.want || len(out.Accounts) != len(tc.accs) {
+				t.Errorf("next_step = %q, want %q (%d accounts)", out.NextStep, tc.want, len(out.Accounts))
+			}
+		})
+	}
+}
+
+// TestManageAccountsAddRemoveOutput pins the JSON (the three outcomes of add among them) the client sees and what
 // reaches WA; the golden file covers only the schemas.
 func TestManageAccountsAddRemoveOutput(t *testing.T) {
 	for _, tc := range []struct {
@@ -182,10 +232,15 @@ func TestManageAccountsAddRemoveOutput(t *testing.T) {
 		call toolstest.Call
 		want string
 	}{
-		{"add qr", &toolstest.WA{Ticket: wa.LinkTicket{LoginURL: "http://127.0.0.1:1/login/x"}},
+		{"add qr", &toolstest.WA{Ticket: wa.LinkTicket{LoginURL: "http://127.0.0.1:1/login/x?t=n", ExpiresAt: expires}},
 			map[string]any{"action": "add", "account_id": "personal"},
 			toolstest.Call{Method: "Link", Nick: "personal"},
-			`{"login_url":"http://127.0.0.1:1/login/x","next_step":"open the link and scan the QR code in WhatsApp → Linked devices","status":"linking"}`},
+			`{"login_url":"http://127.0.0.1:1/login/x?t=n","expires_at":"` + expires.Local().Format(time.RFC3339) +
+				`","next_step":"open the link and scan the QR code in WhatsApp → Linked devices","status":"linking"}`},
+		{"add reconnect", &toolstest.WA{Ticket: wa.LinkTicket{Reconnecting: true}},
+			map[string]any{"action": "add", "account_id": "personal"},
+			toolstest.Call{Method: "Link", Nick: "personal"},
+			`{"next_step":"reconnecting with the existing keys, no QR: check manage-accounts action=list in a few seconds","status":"reconnecting"}`},
 		{"add code", &toolstest.WA{Ticket: wa.LinkTicket{PairCode: "ABCD-EFGH", ExpiresAt: expires}},
 			map[string]any{"action": "add", "account_id": "personal", "phone": "+70000000000"},
 			toolstest.Call{Method: "Link", Nick: "personal", Phone: "+70000000000"},

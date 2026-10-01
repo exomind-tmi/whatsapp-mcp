@@ -153,21 +153,6 @@ func (s *pairSession) phase() pairingPhase {
 	return pairingOpen
 }
 
-// pairing returns the state of nick's latest pairing; false if there was
-// none since the daemon started.
-func (m *Manager) pairing(nick string) (pairStatus, bool) {
-	m.mu.Lock()
-	var s *pairSession
-	if a := m.accounts[nick]; a != nil {
-		s = a.sess
-	}
-	m.mu.Unlock()
-	if s == nil {
-		return pairStatus{}, false
-	}
-	return s.status(), true
-}
-
 // newPairing builds a pairing for a: its client, from newClient as it stays
 // the account's once linked, and the QR channel, which must precede the
 // connect that emits the codes.

@@ -33,11 +33,13 @@ type AccountInfo struct {
 }
 
 // LinkTicket is what the user needs to finish linking: a local QR page or a
-// pairing code to type on the phone.
+// pairing code to type on the phone, or nothing but the news that the
+// account reconnects with the keys it has.
 type LinkTicket struct {
-	LoginURL  string
-	PairCode  string
-	ExpiresAt time.Time
+	LoginURL     string
+	PairCode     string
+	ExpiresAt    time.Time
+	Reconnecting bool // no URL and no code: the existing device connects again
 }
 
 type RemoveResult struct {
@@ -70,5 +72,5 @@ func ValidPhone(s string) bool {
 	return len(d) > 6 && len(d) <= 15 && d[0] != '0'
 }
 
-// ErrNotImplemented is returned by operations that arrive in a later milestone.
-var ErrNotImplemented = errors.New("not implemented until M1: linking and removing WhatsApp accounts arrives with the WhatsApp client in the next milestone")
+// ErrNotImplemented is returned by operations that arrive in a later step.
+var ErrNotImplemented = errors.New("not implemented yet: removing WhatsApp accounts arrives in a later step of the accounts milestone")
