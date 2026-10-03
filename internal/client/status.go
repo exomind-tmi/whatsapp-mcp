@@ -1,6 +1,7 @@
 package client
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
+	"github.com/exomind-tmi/whatsapp-mcp/internal/tools"
 )
 
 // Status prints the daemon state and its accounts, always asking the daemon.
@@ -32,18 +34,9 @@ func Status(ctx context.Context, h home.Home, version string, w io.Writer) error
 		return err
 	}
 	if res.IsError {
-		return fmt.Errorf("manage-accounts list: %s", text(res))
+		return fmt.Errorf("manage-accounts list: %s", cmp.Or(tools.ResultText(res), "(no text)"))
 	}
-	var list struct {
-		Accounts []struct {
-			AccountID string `json:"account_id"`
-			Status    string `json:"status"`
-			Reason    string `json:"reason"`
-			Phone     string `json:"phone"`
-			Chats     int    `json:"chats"`
-			Messages  int    `json:"messages"`
-		} `json:"accounts"`
-	}
+	var list tools.ManageOut
 	b, _ := json.Marshal(res.StructuredContent)
 	if err := json.Unmarshal(b, &list); err != nil {
 		return fmt.Errorf("decode manage-accounts list: %w", err)
@@ -58,13 +51,4 @@ func Status(ctx context.Context, h home.Home, version string, w io.Writer) error
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\n", a.AccountID, a.Status, a.Phone, a.Chats, a.Messages, a.Reason)
 	}
 	return tw.Flush()
-}
-
-func text(res *mcp.CallToolResult) string {
-	for _, c := range res.Content {
-		if t, ok := c.(*mcp.TextContent); ok {
-			return t.Text
-		}
-	}
-	return "(no text)"
 }

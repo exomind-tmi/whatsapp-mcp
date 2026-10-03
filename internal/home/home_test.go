@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,64 @@ func TestEnsureCreatesLayout(t *testing.T) {
 		if st, err := os.Stat(d); err != nil || !st.IsDir() {
 			t.Fatalf("%s not created: %v", d, err)
 		}
+	}
+}
+
+// TestEnsureMakesDirectoriesPrivate: on Unix the state directory and what is in
+// it are the user's alone, also when they exist with a looser mode.
+func TestEnsureMakesDirectoriesPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("access follows the user's profile on Windows")
+	}
+	h := Home{filepath.Join(testutil.TempDir(t), "state")}
+	for _, d := range []string{h.Dir, h.LogsDir(), h.BinDir()} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(d, 0o755); err != nil { // the umask may have taken some
+			t.Fatal(err)
+		}
+	}
+	if err := h.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{h.Dir, h.LogsDir(), h.BinDir()} {
+		if st, err := os.Stat(d); err != nil || st.Mode().Perm() != 0o700 {
+			t.Errorf("%s has the mode %v (%v), want drwx------", d, st.Mode(), err)
+		}
+	}
+
+	fresh := Home{filepath.Join(testutil.TempDir(t), "new")}
+	if err := fresh.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(fresh.Dir); err != nil || st.Mode().Perm() != 0o700 {
+		t.Errorf("a new directory has the mode %v (%v), want drwx------", st.Mode(), err)
+	}
+}
+
+// TestEnsureLeavesAPrivateDirectoryAlone: a directory that is the user's alone is
+// not chmodded, as a shared one that the user cannot chmod must not stop every
+// command; only one that is open to others is made 0700.
+func TestEnsureLeavesAPrivateDirectoryAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("access follows the user's profile on Windows")
+	}
+	h := Home{filepath.Join(testutil.TempDir(t), "state")}
+	for _, d := range []string{h.Dir, h.LogsDir(), h.BinDir()} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(h.BinDir(), 0o500); err != nil { // private, but not 0700
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(h.BinDir(), 0o700) }) // so that the directory can be removed
+	if err := h.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(h.BinDir()); err != nil || st.Mode().Perm() != 0o500 {
+		t.Errorf("a private directory has the mode %v (%v), want it left at dr-x------", st.Mode(), err)
 	}
 }
 

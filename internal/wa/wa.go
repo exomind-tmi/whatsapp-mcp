@@ -1,11 +1,10 @@
-// Package wa manages WhatsApp accounts. It will be the only package that
-// imports whatsmeow (M1); in M0 Manager is a stub with no accounts.
+// Package wa manages WhatsApp accounts. It is the only package that imports
+// whatsmeow.
 package wa
 
 import (
-	"context"
-	"errors"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -28,18 +27,40 @@ type AccountInfo struct {
 	ExpiresAt time.Time // zero unless the status is temporary (e.g. a ban)
 	Phone     string
 	PushName  string
+	Chats     int // archived chats and messages of the account
+	Messages  int
+
+	// LoginPending is set with the status linking when no pairing is running: add
+	// has handed out a login link and its page has not been opened. Only Accounts
+	// sets it.
+	LoginPending bool
 }
 
-// LinkTicket is what the user needs to finish linking: a local QR page or a
-// pairing code to type on the phone.
+// LinkRequest is a call of the add tool. Phone and QRImage are two
+// ways to link that exclude each other; with neither, the answer is a link to
+// a local QR page.
+type LinkRequest struct {
+	Nick    string
+	Phone   string // a pairing code for this number, to type on the phone
+	QRImage bool   // the QR code itself, as an image for the chat
+}
+
+// LinkTicket is what the user needs to finish linking: a local QR page, a QR
+// code as an image for the chat, or a pairing code to type on the phone, or
+// nothing but the news that the account reconnects with the keys it has.
 type LinkTicket struct {
-	LoginURL  string
-	PairCode  string
-	ExpiresAt time.Time
+	LoginURL string
+	PairCode string
+	QRPNG    []byte // the QR code to scan, as a PNG
+	// ExpiresAt is the end of the link, of the QR code in QRPNG or of the
+	// pairing code's window (see issueQR and issueCode).
+	ExpiresAt    time.Time
+	Reconnecting bool // no URL, no image and no code: the existing device connects again
 }
 
+// RemoveResult is what a remove tells besides that the account is gone.
 type RemoveResult struct {
-	Hint string // e.g. "remove the device on the phone manually"
+	Hint string // for the user: the phone may still list the device (removeDeviceHint); "" when it does not
 }
 
 var nickRe = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
@@ -47,23 +68,29 @@ var nickRe = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 // ValidNick reports whether s is an acceptable account nickname.
 func ValidNick(s string) bool { return nickRe.MatchString(s) }
 
-// ErrNotImplemented is returned by operations that arrive in a later milestone.
-var ErrNotImplemented = errors.New("not implemented until M1: linking and removing WhatsApp accounts arrives with the WhatsApp client in the next milestone")
+// phoneRe admits a number as people write it: an optional leading +,
+// digits, spaces, dashes and parentheses.
+var phoneRe = regexp.MustCompile(`^\+?[0-9 ()-]+$`)
 
-// Manager is the M0 stub: no accounts, linking not available yet.
-type Manager struct{}
-
-func NewManager() *Manager { return &Manager{} }
-
-func (*Manager) Accounts(context.Context) []AccountInfo { return nil }
-
-func (*Manager) Link(context.Context, string, string) (LinkTicket, error) {
-	return LinkTicket{}, ErrNotImplemented
+// ValidPhone reports whether s is a number PairPhone accepts. PairPhone
+// drops every non-digit and wants more than 6 digits not starting with 0,
+// i.e. in international form (pair-code.go:97-102); letters are refused
+// here rather than dropped, and E.164 caps a number at 15 digits.
+func ValidPhone(s string) bool {
+	if !phoneRe.MatchString(s) {
+		return false
+	}
+	d := phoneDigits(s)
+	return len(d) > 6 && len(d) <= 15 && d[0] != '0'
 }
 
-func (*Manager) Remove(context.Context, string) (RemoveResult, error) {
-	return RemoveResult{}, ErrNotImplemented
+// phoneDigits is s without its non-digits: the number as WhatsApp's JIDs
+// have it, and as PairPhone reads it.
+func phoneDigits(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, s)
 }
-
-// Close disconnects all clients.
-func (*Manager) Close() error { return nil }
