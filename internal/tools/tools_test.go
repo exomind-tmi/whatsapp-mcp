@@ -194,8 +194,10 @@ func sameJSON(t *testing.T, got, want string) bool {
 	return reflect.DeepEqual(g, w)
 }
 
-// ExpiresAt is shown in local time, so the expectations format it the same way.
-var expires = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+// expires is a time that has not come yet: list judges a ban by the real
+// clock, and a ban that is over asks for a different next_step. ExpiresAt is
+// shown in local time, so the expectations format it the same way.
+var expires = time.Now().Add(24 * time.Hour).Truncate(time.Second).UTC()
 
 func TestManageAccountsList(t *testing.T) {
 	fake := &toolstest.WA{Accs: []wa.AccountInfo{
