@@ -67,6 +67,63 @@ func TestOpenCreatesSchema(t *testing.T) {
 	}
 }
 
+// TestPools: one writer connection, so that every write is serialised and a
+// transaction cannot wait for a second connection of its own; several readers,
+// read-only; and a reopened archive finds its readers working at once.
+func TestPools(t *testing.T) {
+	p := filepath.Join(testutil.TempDir(t), "archive.db")
+	db := openAt(t, p)
+	if n := db.w.Stats().MaxOpenConnections; n != 1 {
+		t.Errorf("the writer has %d connections, want 1", n)
+	}
+	if n := db.r.Stats().MaxOpenConnections; n != readers || readers < 2 {
+		t.Errorf("the reader pool has %d connections, want %d (and more than one)", n, readers)
+	}
+	var queryOnly int
+	if err := db.r.QueryRow("PRAGMA query_only").Scan(&queryOnly); err != nil || queryOnly != 1 {
+		t.Errorf("reader query_only = %d, %v; want 1", queryOnly, err)
+	}
+	if err := db.w.QueryRow("PRAGMA query_only").Scan(&queryOnly); err != nil || queryOnly != 0 {
+		t.Errorf("writer query_only = %d, %v; want 0", queryOnly, err)
+	}
+
+	if err := db.AddAccount(bg, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	db = openAt(t, p)
+	if accs, err := db.Accounts(bg); err != nil || len(accs) != 1 {
+		t.Errorf("after reopening the reader sees %v, %v", accs, err)
+	}
+}
+
+// TestTxTakesTheWriteLockAtBegin: a transaction takes the write lock when it
+// begins, not at its first write (sqlitedb.Pragmas has _txlock=immediate, a
+// parameter of the DSN that no PRAGMA shows). One that read first and wrote
+// later would fail with SQLITE_BUSY at once, which the busy timeout does not
+// retry, if another connection had committed in between. That a second
+// connection cannot write while the transaction is still only open is the
+// visible side of it.
+func TestTxTakesTheWriteLockAtBegin(t *testing.T) {
+	p := filepath.Join(testutil.TempDir(t), "archive.db")
+	db := openAt(t, p)
+	other, err := sqlitedb.Open(p, "_pragma=busy_timeout(50)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+
+	err = db.Tx(bg, func(tx *Tx) error {
+		if _, err := other.Exec(`INSERT INTO accounts(nick, created_at) VALUES ('x', 1)`); err == nil {
+			t.Error("another connection wrote while a transaction that had not written yet was open")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReopenKeepsSchemaAndData(t *testing.T) {
 	p := filepath.Join(testutil.TempDir(t), "archive.db")
 	db, err := Open(p)

@@ -66,6 +66,63 @@ func TestPragmas(t *testing.T) {
 	}
 }
 
+// TestReadOnly: a pool opened with ReadOnly sees the writer's commits and
+// cannot write, whichever of its two guards is taken away.
+func TestReadOnly(t *testing.T) {
+	p := filepath.Join(testutil.TempDir(t), "x.db")
+	w, err := Open(p, Pragmas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	w.SetMaxOpenConns(1)
+	if _, err := w.Exec(`CREATE TABLE t(x); INSERT INTO t VALUES ('a')`); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(p, ReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	count := func() (n int) {
+		t.Helper()
+		if err := r.QueryRow(`SELECT count(*) FROM t`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("the reader sees %d rows, want the writer's 1", n)
+	}
+	if _, err := w.Exec(`INSERT INTO t VALUES ('b')`); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("the reader sees %d rows after a commit, want 2", n)
+	}
+
+	for _, q := range []string{`INSERT INTO t VALUES ('c')`, `DELETE FROM t`, `CREATE TABLE u(x)`} {
+		if _, err := r.Exec(q); err == nil {
+			t.Errorf("a write through ReadOnly succeeded: %s", q)
+		}
+	}
+	conn, err := r.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), `PRAGMA query_only = 0`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `INSERT INTO t VALUES ('d')`); err == nil || !strings.Contains(err.Error(), "readonly") {
+		t.Errorf("with query_only off, a write = %v, want the file's own read-only error", err)
+	}
+	if n := count(); n != 2 {
+		t.Errorf("%d rows after the refused writes, want 2", n)
+	}
+}
+
 // TestCheckpoint: a checkpoint that a reader holds off is an error, not the silent
 // success it is to the driver, and one that is not held off empties the WAL.
 func TestCheckpoint(t *testing.T) {

@@ -1,10 +1,15 @@
 // Package archive owns archive.db: the schema and its migrations, the
-// accounts and, later, the message archive itself.
+// accounts, the message archive and the queue of history notifications.
 //
-// There is one pool, the writer (MaxOpenConns(1)). A read-only pool for the
-// message queries is to come, so that reads do not queue behind history writes;
-// for now only a few small statements per manage-accounts call run, and none is
-// needed.
+// There are two pools. All writes go through the writer (MaxOpenConns(1), so
+// every write is serialised and a transaction cannot deadlock against a second
+// connection of its own), and all reads through the reader pool, which is
+// read-only and has several connections: a tool that reads does not queue
+// behind a history sync writing its chunks, WAL lets both run at once.
+// Writes of a message and its chat go through DB.Tx; the one rule of a Tx is
+// that nothing inside it may call the DB's own methods: a write would wait for
+// the writer connection the Tx holds, and a read would not see what the Tx has
+// written, which is not committed yet.
 package archive
 
 import (
@@ -18,12 +23,19 @@ import (
 // ErrNewerSchema means archive.db was written by a newer whatsapp-mcp.
 var ErrNewerSchema = errors.New("archive.db was created by a newer whatsapp-mcp")
 
-type DB struct{ w *sql.DB }
+// readers is the size of the reader pool: enough for the tools of a few
+// sessions to read at once, few enough that each keeps its page cache warm.
+const readers = 4
+
+type DB struct{ w, r *sql.DB }
 
 // Open opens archive.db, creating it if needed, brings its schema up to
 // SchemaVersion and refuses a newer one. foreign_keys is a per-connection
 // setting, so it lives in the DSN: every connection the pool opens gets it,
-// and without it DeleteAccount would cascade nothing.
+// and without it DeleteAccount would cascade nothing. The writer connects
+// first, so that the WAL and its shared memory file are in place for the
+// readers: a read-only connection can open a WAL database only if it finds
+// them or is allowed to create them.
 func Open(path string) (*DB, error) {
 	if err := migrate(path); err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
@@ -33,7 +45,23 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	w.SetMaxOpenConns(1)
-	return &DB{w: w}, nil
+	r, err := sqlitedb.Open(path, sqlitedb.ReadOnly)
+	if err != nil {
+		w.Close()
+		return nil, err
+	}
+	// Idle connections are kept: a connection reopened per query would parse
+	// the schema again each time.
+	r.SetMaxOpenConns(readers)
+	r.SetMaxIdleConns(readers)
+	db := &DB{w: w, r: r}
+	for _, pool := range []*sql.DB{w, r} {
+		if err := pool.Ping(); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("open %s: %w", path, err)
+		}
+	}
+	return db, nil
 }
 
 // migrate applies the missing steps in one transaction together with the
@@ -93,4 +121,12 @@ func migrate(path string) error {
 	return tx.Commit()
 }
 
-func (db *DB) Close() error { return db.w.Close() }
+// Close closes the readers first and the writer last: SQLite checkpoints the WAL
+// and deletes it when the last connection closes, and a read-only connection
+// cannot, so one that closed last would leave the WAL and its -shm behind.
+// Queries and transactions still running are the caller's to stop first
+// (the daemon stops the workers and the server before it closes the archive).
+func (db *DB) Close() error {
+	rerr := db.r.Close()
+	return errors.Join(rerr, db.w.Close())
+}

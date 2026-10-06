@@ -33,6 +33,16 @@ import (
 // above the ~4 MiB an automatic checkpoint (1000 pages) lets it grow to.
 const Pragmas = "_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=secure_delete(1)&_pragma=journal_size_limit(16777216)&_txlock=immediate"
 
+// ReadOnly is the DSN of a pool that only reads a database somebody else has
+// already created and put in WAL mode: it sees every commit of the writer and
+// never blocks it. mode=ro is what keeps it from writing (SQLite itself
+// refuses); query_only is the second lock on the same door, so that a write
+// fails with a plain error even if a driver update stopped honouring the URI
+// parameter. There is no _txlock: BEGIN IMMEDIATE is a write, and a read-only
+// connection cannot make one. Unlike Pragmas it sets no journal_mode: the
+// writer's is stored in the file, and changing it needs a write.
+const ReadOnly = "mode=ro&_pragma=busy_timeout(10000)&_pragma=query_only(1)"
+
 // Open opens the database at path; query holds the driver's DSN parameters.
 func Open(path, query string) (*sql.DB, error) {
 	return sql.Open("sqlite", DSN(path, query))

@@ -30,9 +30,10 @@ type Account struct {
 }
 
 // Accounts lists the accounts by nick. Both counts are index-only scans:
-// chats and messages are keyed by account first.
+// chats and messages are keyed by account first. It reads on the reader pool,
+// so that a list does not wait for a history sync that is writing.
 func (db *DB) Accounts(ctx context.Context) ([]Account, error) {
-	rows, err := db.w.QueryContext(ctx, `
+	rows, err := db.r.QueryContext(ctx, `
 SELECT a.nick, a.jid, a.created_at,
   (SELECT count(*) FROM chats c WHERE c.account = a.nick),
   (SELECT count(*) FROM messages m WHERE m.account = a.nick)
@@ -112,7 +113,10 @@ var ErrNotScrubbed = errors.New("the account is deleted, but its old copies may 
 // call must not turn into a delete left half scrubbed; if any of them fails, the
 // error is ErrNotScrubbed. A reader that holds off the checkpoint leaves the
 // VACUUM's copy of the database in the WAL; the automatic checkpoints move it
-// later, and journal_size_limit (sqlitedb.Pragmas) cuts the file back.
+// later, and journal_size_limit (sqlitedb.Pragmas) cuts the file back. The
+// archive's own readers are such a reader only while a query is running, and
+// the checkpoint waits for that (busy_timeout); the idle connections of the
+// reader pool hold nothing.
 // VACUUM cannot run inside a transaction, so it goes straight to the writer;
 // while it runs, writes of the other accounts wait, and at its peak it needs
 // about twice the database in extra disk space: its temp copy plus the WAL.
