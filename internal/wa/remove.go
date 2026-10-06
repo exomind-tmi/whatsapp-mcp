@@ -24,7 +24,7 @@ const removeDeviceHint = "remove the device on the phone manually: WhatsApp → 
 // reason long after the call, and not know that the user still wants the removal. A
 // restart forgets it, and the account is then as if its keys were lost (noKeysReason).
 const removalInterruptedReason = "the removal was interrupted: the device is unlinked and the message archive is not deleted yet; " +
-	"to finish it call remove again (it deletes the message archive: ask the user first), or call add to link the account again (the archive is kept)"
+	"to finish it call remove-account again (it deletes the message archive: ask the user first), or call add to link the account again (the archive is kept)"
 
 // repeatOrTell ends the error of a remove that failed on what only the log tells (the
 // database's words). A failure that stays, a full disk or a scanner that holds the

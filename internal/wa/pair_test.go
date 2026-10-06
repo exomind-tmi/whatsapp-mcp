@@ -567,8 +567,8 @@ func TestPrePairCallbackConcurrent(t *testing.T) {
 // another number: the way out of it, remove and add, deletes the archive, and
 // the refusal may be false, so the agent is told to ask the user first.
 func TestDifferentNumberReason(t *testing.T) {
-	for _, want := range []string{"different phone number", "remove the account and add it again",
-		"removing the account deletes its message archive", "ask the user first"} {
+	for _, want := range []string{"different phone number", "call remove-account for this account and then add it again",
+		"remove-account deletes the message archive", "ask the user first"} {
 		if !strings.Contains(differentNumberReason, want) {
 			t.Errorf("the refusal %q lacks %q", differentNumberReason, want)
 		}

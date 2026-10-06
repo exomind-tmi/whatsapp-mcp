@@ -33,8 +33,8 @@ const cancelledReason = "linking was cancelled; call add again"
 // what removing costs, as the way out of it is a remove, which deletes the archive,
 // and the refusal can be false: the number a JID holds is not always the one a
 // user types (Mexico, Argentina, Brazil), so the user decides, not the agent.
-const differentNumberReason = "this is a different phone number; to use it, remove the account and add it again " +
-	"(removing the account deletes its message archive: ask the user first)"
+const differentNumberReason = "this is a different phone number; to use it, call remove-account for this account and then add it again " +
+	"(remove-account deletes the message archive: ask the user first)"
 
 // The timeouts of the QR codes whatsmeow shows: the first one only when the
 // server sent six refs, else every code gets the shorter one

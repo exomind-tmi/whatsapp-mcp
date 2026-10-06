@@ -94,7 +94,7 @@ func TestShimForwardsToDaemon(t *testing.T) {
 
 	// tools/list is answered by the shim itself.
 	list, err := cs.ListTools(context.Background(), nil)
-	if err != nil || len(list.Tools) != 1 {
+	if err != nil || len(list.Tools) != 2 {
 		t.Fatalf("tools/list: %v %+v", err, list)
 	}
 
@@ -111,15 +111,20 @@ func TestShimForwardsToDaemon(t *testing.T) {
 	if res.IsError || !strings.Contains(text, `"login_url":"http://127.0.0.1:`) {
 		t.Fatalf("add via daemon: isError=%v %s", res.IsError, text)
 	}
-	// remove forgets the account the add made, and a second one is refused: which
-	// is also how an isError result is seen to survive the forwarding.
-	res, text = callText(t, cs, "manage-accounts", map[string]any{"action": "remove", "account_id": "personal"})
-	if res.IsError || !strings.Contains(text, `"status":"removed"`) {
-		t.Fatalf("remove via daemon: isError=%v %s", res.IsError, text)
+	// remove-account asks first, then forgets the account the add made, and a
+	// second removal is refused: which is also how an isError result is seen to
+	// survive the forwarding.
+	res, text = callText(t, cs, "remove-account", map[string]any{"account_id": "personal"})
+	if res.IsError || !strings.Contains(text, `"status":"needs_confirmation"`) {
+		t.Fatalf("remove-account without confirm via daemon: isError=%v %s", res.IsError, text)
 	}
-	res, text = callText(t, cs, "manage-accounts", map[string]any{"action": "remove", "account_id": "personal"})
+	res, text = callText(t, cs, "remove-account", map[string]any{"account_id": "personal", "confirm": "personal"})
+	if res.IsError || !strings.Contains(text, `"status":"removed"`) {
+		t.Fatalf("remove-account via daemon: isError=%v %s", res.IsError, text)
+	}
+	res, text = callText(t, cs, "remove-account", map[string]any{"account_id": "personal", "confirm": "personal"})
 	if !res.IsError || !strings.Contains(text, `no account "personal"`) {
-		t.Fatalf("remove: isError lost in forwarding: %v %s", res.IsError, text)
+		t.Fatalf("remove-account: isError lost in forwarding: %v %s", res.IsError, text)
 	}
 }
 

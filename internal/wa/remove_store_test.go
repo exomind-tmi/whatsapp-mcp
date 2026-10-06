@@ -393,7 +393,7 @@ func TestRemoveInterruptedSaysSo(t *testing.T) {
 		t.Fatal("the delete of the archive was not refused")
 	}
 	got := infoOf(m, "personal")
-	if got.Status != StatusNeedsLink || !strings.Contains(got.Reason, "call remove again") || !strings.Contains(got.Reason, "add") {
+	if got.Status != StatusNeedsLink || !strings.Contains(got.Reason, "call remove-account again") || !strings.Contains(got.Reason, "add") {
 		t.Errorf("account %+v", got)
 	}
 	if got := archiveOf(t, f)["personal"]; got != [2]int{1, 2} {
@@ -407,7 +407,7 @@ func TestRemoveInterruptedSaysSo(t *testing.T) {
 // refusal of a relink with another number does; and that add is the other way out,
 // which keeps the archive.
 func TestRemovalInterruptedReason(t *testing.T) {
-	for _, want := range []string{"the removal was interrupted", "call remove again", "deletes the message archive",
+	for _, want := range []string{"the removal was interrupted", "call remove-account again", "deletes the message archive",
 		"ask the user first", "call add to link the account again", "the archive is kept"} {
 		if !strings.Contains(removalInterruptedReason, want) {
 			t.Errorf("the reason %q lacks %q", removalInterruptedReason, want)
