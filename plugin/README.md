@@ -4,8 +4,7 @@
 
 A plugin that lets Claude read, search and send WhatsApp messages across several linked
 accounts. It runs locally: one background process holds WhatsApp connections, and every
-Claude session on that device talks to it. Nothing goes through third-party servers besides
-WhatsApp itself.
+Claude session on that device talks to it. The background process talks only to WhatsApp.
 
 The plugin works in all Cowork and Claude Code sessions, but not in the Chat mode of
 Claude Desktop: Chat does not load MCP servers from plugins.

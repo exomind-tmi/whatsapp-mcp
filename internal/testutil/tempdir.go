@@ -32,3 +32,19 @@ func TempDir(t testing.TB) string {
 	})
 	return dir
 }
+
+// WaitForLog fails the test unless the file at path holds want within five
+// seconds, for a line that a goroutine of the code under test writes.
+func WaitForLog(t testing.TB, path, want string) {
+	t.Helper()
+	var b []byte
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		b, _ = os.ReadFile(path)
+		if strings.Contains(string(b), want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s has no %q:\n%s", path, want, b)
+		}
+	}
+}

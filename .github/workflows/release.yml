@@ -1,7 +1,8 @@
 # Release on a v* tag, in three jobs:
 #
 #   build    builds both binaries from the tagged commit, with SHA256SUMS and
-#            the third-party license texts. Its token cannot write, so the
+#            the third-party license texts, and the source of the GPL and MPL
+#            components. Its token cannot write, so the
 #            tests and tools it runs cannot publish; it restores no Go cache,
 #            so a cache written by another run cannot reach the release.
 #   publish  publishes what build made as a GitHub Release. It checks out and
@@ -162,7 +163,7 @@ jobs:
             # own) and the plugin package.
             go test ./tests/launcher/
             bash scripts/plugin.sh
-            git commit --quiet -am "Pin the plugin to $TAG"
+            git commit --quiet -am "chore(release): pin the plugin to $TAG"
             git push origin HEAD:main && exit 0
             echo "main moved, retrying"
             sleep $((attempt * 5))

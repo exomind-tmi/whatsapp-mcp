@@ -5,5 +5,5 @@
   "author": { "name": "Exomind Tmi", "url": "https://github.com/exomind-tmi" },
   "homepage": "https://github.com/exomind-tmi/whatsapp-mcp",
   "repository": "https://github.com/exomind-tmi/whatsapp-mcp",
-  "license": "MIT"
+  "license": "GPL-3.0-only"
 }
