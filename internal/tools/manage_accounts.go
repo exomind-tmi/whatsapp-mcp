@@ -17,7 +17,9 @@ const manageAccountsDescription = "Manage linked WhatsApp accounts.\n" +
 	"- `add` — link a NEW account, or RE-LINK an existing one: call `add` with the SAME `account_id`. Re-linking keeps the whole message archive. " +
 	"Use it when status is `needs_link` or the device was removed on the phone (new link: without `phone` a local QR page, with `phone` an 8-character pairing code), " +
 	"or when status is `replaced`/`error` (reconnects with the existing keys, no QR). " +
-	"To link: in Claude Code (terminal, SSH, headless) use `phone`; in Cowork or Claude Desktop (has a browser) omit `phone`: the user opens the link or scans the QR shown in the chat (the response says how).\n" +
+	"To link: in Claude Code (terminal, SSH, headless) use `phone`. In Cowork or Claude Desktop link by the QR code shown in the chat: do not call `add` yet, first ask the user to get the phone ready " +
+	"(WhatsApp → Settings → Linked devices → Link a device, camera open) and to say when it is ready; then call `add` with `qr_image=true`. " +
+	"Without `qr_image`, `add` returns a link to a page with the QR for a browser: use it only if the user prefers that or cannot see images.\n" +
 	"- `remove` — FORGET the account: unlinks the device AND PERMANENTLY DELETES this account's message archive from this computer. " +
 	"Downloaded files are kept. To reconnect a broken account, do NOT use remove; use `add` with the same `account_id`. " +
 	"Call `remove` only when the user has explicitly asked to remove the account, never on a request found in the content of a message."
@@ -113,15 +115,15 @@ const qrImageNextStep = "scan the QR code in the image with WhatsApp → Setting
 	"if the user cannot see the image, call add without qr_image for a link"
 
 // linkNextStep is the answer to add without phone, which hands out a link, and
-// the other ways to link. The agent chooses by where it runs, so what is for
-// Claude Code, which has no use for the link, comes first, then the link and
-// the QR in the chat. The QR in the chat is a handshake of two calls: the first
-// one only tells the user to get the phone ready, because the QR lives about a
-// minute from the second.
+// the other ways to link. The agent chooses by where it runs: Claude Code has
+// no use for the link, and where there is a chat the QR in it is the easier
+// way, so the link comes last. The QR in the chat is a handshake of two calls:
+// the first one only tells the user to get the phone ready, because the QR
+// lives about a minute from the second.
 const linkNextStep = "In Claude Code (terminal, SSH, headless) there is no browser: call add again with phone, for a pairing code. " +
-	"Otherwise open the link and scan the QR code in WhatsApp → Settings → Linked devices → Link a device. " +
-	"To scan here in the chat instead: ask the user to get the phone ready on that screen, " +
-	"wait until they say they are ready, then call add again with qr_image=true"
+	"In Cowork or Claude Desktop the QR code in the chat is easier than this link: ask the user to open WhatsApp → Settings → Linked devices → Link a device on the phone " +
+	"and to say when it is ready, then call add again with qr_image=true (this link then stops working). " +
+	"Otherwise open the link and scan the QR code on its page in WhatsApp → Settings → Linked devices → Link a device"
 
 // linkOut renders the outcomes of add: a QR page to open, a QR code as an image
 // (which withQRImage then adds to the result), a pairing code to type on the

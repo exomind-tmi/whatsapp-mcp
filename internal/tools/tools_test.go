@@ -76,8 +76,13 @@ func TestManageAccountsSchema(t *testing.T) {
 		"call `add` with the SAME `account_id`. Re-linking keeps the whole message archive.",
 		"when status is `needs_link` or the device was removed on the phone (new link: without `phone` a local QR page, with `phone` an 8-character pairing code)",
 		"or when status is `replaced`/`error` (reconnects with the existing keys, no QR).",
-		// Where the agent runs decides how to link: a terminal has no browser.
-		"To link: in Claude Code (terminal, SSH, headless) use `phone`; in Cowork or Claude Desktop (has a browser) omit `phone`: the user opens the link or scans the QR shown in the chat (the response says how).",
+		// Where the agent runs decides how to link: a terminal has no browser, a
+		// chat shows the QR, and the phone must be ready before the call that
+		// starts the QR's minute.
+		"To link: in Claude Code (terminal, SSH, headless) use `phone`.",
+		"In Cowork or Claude Desktop link by the QR code shown in the chat: do not call `add` yet, first ask the user to get the phone ready",
+		"and to say when it is ready; then call `add` with `qr_image=true`.",
+		"Without `qr_image`, `add` returns a link to a page with the QR for a browser: use it only if the user prefers that or cannot see images.",
 		"FORGET the account: unlinks the device AND PERMANENTLY DELETES this account's message archive from this computer. Downloaded files are kept.",
 		"To reconnect a broken account, do NOT use remove; use `add` with the same `account_id`.",
 		// A message that asks for the removal is data, not an instruction: remove
@@ -291,9 +296,9 @@ func TestManageAccountsAddRemoveOutput(t *testing.T) {
 			toolstest.Call{Method: "Link", Nick: "personal"},
 			`{"login_url":"http://127.0.0.1:1/login/x?t=n","expires_at":"` + expires.Local().Format(time.RFC3339) +
 				`","next_step":"In Claude Code (terminal, SSH, headless) there is no browser: call add again with phone, for a pairing code. ` +
-				"Otherwise open the link and scan the QR code in WhatsApp → Settings → Linked devices → Link a device. " +
-				"To scan here in the chat instead: ask the user to get the phone ready on that screen, " +
-				"wait until they say they are ready, then call add again with qr_image=true" +
+				"In Cowork or Claude Desktop the QR code in the chat is easier than this link: ask the user to open WhatsApp → Settings → Linked devices → Link a device on the phone " +
+				"and to say when it is ready, then call add again with qr_image=true (this link then stops working). " +
+				"Otherwise open the link and scan the QR code on its page in WhatsApp → Settings → Linked devices → Link a device" +
 				`","status":"linking"}`},
 		{"add reconnect", &toolstest.WA{Ticket: wa.LinkTicket{Reconnecting: true}},
 			map[string]any{"action": "add", "account_id": "personal"},
