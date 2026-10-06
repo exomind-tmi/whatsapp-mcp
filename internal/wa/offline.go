@@ -6,6 +6,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/types"
 )
 
 var errOffline = errors.New("offline: this Manager never reaches WhatsApp")
@@ -29,6 +30,7 @@ func offlineNetwork() network {
 		pairPhone: func(*whatsmeow.Client, context.Context, string, bool, whatsmeow.PairClientType, string) (string, error) {
 			return "", errOffline
 		},
+		joinedGroups: func(*whatsmeow.Client, context.Context) ([]*types.GroupInfo, error) { return nil, errOffline },
 		retryStep:    live.retryStep,
 		deleteDevice: live.deleteDevice, // store.db is ours
 	}

@@ -42,10 +42,16 @@ type fakeNet struct {
 	pairErr   error                       // what it fails with instead
 	pairHold  func(context.Context) error // runs inside PairPhone, e.g. to wait for its ctx; its error is the result
 
-	mu     sync.Mutex
-	calls  []string   // "connect <phone>" once Connect returns, "disconnect <phone>", "logout <phone>", "qr <phone>", "pairphone <phone>"
-	qrs    []fakeQR   // one per GetQRChannel
-	phones []pairCall // one per PairPhone
+	// groups is what GetJoinedGroups returns; none, with no error, unless the test
+	// sets it. Its calls are counted apart from calls, which is the list of what
+	// the tests of connecting, pairing and removing compare whole.
+	groups func(cli *whatsmeow.Client, ctx context.Context) ([]*types.GroupInfo, error)
+
+	mu          sync.Mutex
+	calls       []string   // "connect <phone>" once Connect returns, "disconnect <phone>", "logout <phone>", "qr <phone>", "pairphone <phone>"
+	qrs         []fakeQR   // one per GetQRChannel
+	phones      []pairCall // one per PairPhone
+	groupsCalls int        // GetJoinedGroups
 }
 
 // pairCodeOK is what the fake PairPhone returns, in the format of the real
@@ -163,6 +169,15 @@ func (f *fakeNet) network(g *waGlobals) network {
 			return deleteStored(ctx, cli)
 		},
 		deleteDevice: func(cli *whatsmeow.Client, ctx context.Context) error { return deleteStored(ctx, cli) },
+		joinedGroups: func(cli *whatsmeow.Client, ctx context.Context) ([]*types.GroupInfo, error) {
+			f.mu.Lock()
+			f.groupsCalls++
+			f.mu.Unlock()
+			if f.groups == nil {
+				return nil, nil
+			}
+			return f.groups(cli, ctx)
+		},
 		qrChannel: func(cli *whatsmeow.Client, ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -371,10 +386,10 @@ func TestManagerLoad(t *testing.T) {
 		!cli.ManualHistorySyncDownload || !cli.DisableManualHistorySyncReceipt || cli.PrePairCallback != nil {
 		t.Errorf("client settings are not the expected ones: %+v", cli)
 	}
-	// The decrypted event buffer would write the text of each incoming message
-	// into store.db, where nothing stores messages yet.
-	if cli.EnableDecryptedEventBuffer {
-		t.Error("the decrypted event buffer is on: the plaintext of messages would pass through store.db")
+	// A message whose handler fails is sent again by WhatsApp, and can be read
+	// again only from the buffer: its key is spent (see newClient).
+	if !cli.EnableDecryptedEventBuffer {
+		t.Error("the decrypted event buffer is off: a message that could not be archived would be lost for good")
 	}
 }
 
@@ -464,18 +479,25 @@ func TestManagerEvents(t *testing.T) {
 		}
 	}
 
-	// History is neither stored nor shown in the log yet.
-	history := &events.Message{Message: &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
-		HistorySyncNotification: &waE2E.HistorySyncNotification{
-			SyncType:                          waE2E.HistorySyncType_INITIAL_BOOTSTRAP.Enum(),
-			InitialHistBootstrapInlinePayload: []byte("SECRET"),
-		},
-	}}}
+	// A history notification is queued for the worker, and the log has its kind and
+	// not its content. The notification is the phone's own, as whatsmeow takes only
+	// those for one.
+	history := &events.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{IsFromMe: true}, ID: "H1"},
+		Message: &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+			HistorySyncNotification: &waE2E.HistorySyncNotification{
+				SyncType:                          waE2E.HistorySyncType_INITIAL_BOOTSTRAP.Enum(),
+				InitialHistBootstrapInlinePayload: []byte("SECRET"),
+			},
+		}}}
 	if dispatch(history) {
 		t.Error("a handler failed a history notification")
 	}
-	if out := buf.String(); !strings.Contains(out, "history sync ignored") || strings.Contains(out, "SECRET") {
+	if out := buf.String(); !strings.Contains(out, "history sync queued") || strings.Contains(out, "SECRET") {
 		t.Errorf("want the history notification logged without its content:\n%s", out)
+	}
+	if q, ok, err := f.db.QueueNext(context.Background(), "personal"); err != nil || !ok || q.MsgID != "H1" {
+		t.Errorf("queue: %+v %v %v", q, ok, err)
 	}
 
 	// Close drops the sockets, which whatsmeow reports as events; they no

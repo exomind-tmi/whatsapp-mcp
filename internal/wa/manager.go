@@ -57,6 +57,11 @@ type network struct {
 	pairPhone  func(cli *whatsmeow.Client, ctx context.Context, phone string, push bool, typ whatsmeow.PairClientType, name string) (string, error)
 	retryStep  time.Duration // the backoff added per failed connect
 
+	// joinedGroups is the account's list of groups, for their names (see groups.go);
+	// the one query the Manager makes of WhatsApp for the archive. A message's
+	// handler never makes it.
+	joinedGroups func(*whatsmeow.Client, context.Context) ([]*types.GroupInfo, error)
+
 	// deleteDevice is the one write of our own to the client's store.Device, whose
 	// ID and Deleted whatsmeow reads and writes without a lock. It is a seam, as the
 	// connects that read them are, so that a test's network takes the lock of its
@@ -73,6 +78,7 @@ var liveNetwork = network{
 	pairPhone:    (*whatsmeow.Client).PairPhone,
 	retryStep:    2 * time.Second, // whatsmeow's own (client.go:634)
 	deleteDevice: func(cli *whatsmeow.Client, ctx context.Context) error { return cli.Store.Delete(ctx) },
+	joinedGroups: (*whatsmeow.Client).GetJoinedGroups,
 }
 
 // Manager owns the WhatsApp client of every account and keeps each one's
@@ -91,6 +97,9 @@ type Manager struct {
 	phoneWait  time.Duration // and then WhatsApp's answer to PairPhone
 	abortWait  time.Duration // and the wait of any call for what it has told to stop, a pairing or a device being unlinked, to end (see awaitEnd)
 	logoutWait time.Duration // the Logout of a device that is taken away: a removed account's, a relinked account's old one
+	writeWait  time.Duration // how long the handler of a message waits for archive.db
+	groupsWait time.Duration // the fetch of an account's groups and the write of their names
+	now        func() time.Time
 
 	// ctx is every client's BackgroundEventCtx: keepalive and whatsmeow's
 	// reconnects run on it (client.go:500-502, 583-584). It ends on Close alone,
@@ -100,7 +109,7 @@ type Manager struct {
 	// waits for the calls, and closes the Manager after.
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup // the connects and pairings; Add only under mu while !closed
+	wg     sync.WaitGroup // the connects and pairings, the group fetches and the handlers of events at work; Add only under mu while !closed
 
 	// mu is never held while calling into whatsmeow: dispatchEvent holds the
 	// client's handler lock while our handler waits for mu (client.go:980-990).
@@ -131,6 +140,8 @@ type account struct {
 	removing   bool    // a remove call has the account
 	unlinking  *unlink // the goroutine taking its device away, which may outlive the call that began it
 	removeHint string  // what remove tells once the device is gone: kept for a remove that has to be repeated
+
+	syncingGroups bool // a goroutine is fetching the names of the account's groups (see startGroupSync)
 }
 
 // newAccount is an account with no device.
@@ -175,6 +186,9 @@ func newManager(ctx context.Context, cfg Config, net network) (*Manager, error) 
 		phoneWait:  phoneWait,
 		abortWait:  abortWait,
 		logoutWait: logoutWait,
+		writeWait:  writeWait,
+		groupsWait: groupsWait,
+		now:        time.Now,
 		accounts:   map[string]*account{},
 	}
 	m.ctx, m.cancel = context.WithCancel(context.WithoutCancel(ctx))
@@ -279,16 +293,35 @@ func (m *Manager) newClient(a *account, dev *store.Device) *whatsmeow.Client {
 	cli.InitialAutoReconnect = true // a laptop offline at start
 	cli.SynchronousAck = true
 	cli.AutomaticMessageRerequestFromPhone = true
-	// EnableDecryptedEventBuffer stays off for now: it writes the plaintext of
-	// every incoming message into store.db, to be cleared once the handler
-	// returns (message.go:525-565, 463-477), so that a message decrypted but not
-	// yet handled when the process dies is not lost. No message is stored yet,
-	// so there is nothing to protect and the text would only pass through the
-	// file and its WAL. The message archive will need it.
+	// The archive needs EnableDecryptedEventBuffer. Decrypting a message spends its
+	// key: the session ratchet moves on, and the same ciphertext cannot be
+	// decrypted again. Without the buffer a message that is decrypted but not yet
+	// in the archive is lost if the process dies in between, and so is one whose
+	// handler returns false because the archive could not be written, though
+	// WhatsApp sends it again, as it is not acknowledged (message.go:459-462). With
+	// the buffer whatsmeow keeps the plaintext in store.db, written in the transaction that
+	// decrypts, until the handler has returned success (message.go:518-566), and
+	// answers a redelivery from it. Once the handler has succeeded the plaintext is
+	// cleared and only the hash stays, so that a message sent again is dropped
+	// before the handler sees it (message.go:463-487, 408); the acknowledgement,
+	// with SynchronousAck, goes out after that (message.go:489-497). The cost is
+	// that the plaintext of a message passes through store.db and its WAL; remove
+	// deletes it with the device.
 	//
-	// For the same reason no history blob is downloaded and no hist_sync receipt
-	// is sent (message.go:892-906); the notification itself is still acked like
-	// any message (message.go:495).
+	// A limit of the buffer that nothing here can close: an entry is found by the
+	// ciphertext and by the address the sender encrypts from (message.go:339-355,
+	// 530-533), which is the sender's phone JID until the store knows a LID for it,
+	// and the LID after. A message of a sender known by number alone that the
+	// archive refused, and is sent again once the pair has become known (a fetch of
+	// the groups brings pairs, as does another message), is looked up under the
+	// other address and not found, is decrypted a second time, which the spent key
+	// cannot do (an old counter), and is acknowledged all the same
+	// (message.go:408-419, 489-497). It is lost. TestDecryptedEventBufferMissesWhenTheLIDBecomesKnown
+	// shows it, and fails if a later whatsmeow closes it.
+	cli.EnableDecryptedEventBuffer = true
+	// whatsmeow downloads no history blob and sends no hist_sync receipt
+	// (message.go:892-906): the notification is queued by the handler (receive), for
+	// the worker to download, and is acknowledged like any message once it is.
 	cli.ManualHistorySyncDownload = true
 	cli.DisableManualHistorySyncReceipt = true
 	// Called on autoReconnect's goroutine after a failed attempt
@@ -303,42 +336,51 @@ func (m *Manager) newClient(a *account, dev *store.Device) *whatsmeow.Client {
 	return cli
 }
 
-// handler returns the event handler of the account's client cli. It
-// returns true for every event: false stops the dispatch to the handlers
-// after it, such as a pairing's QR channel (client.go:989-993), and makes
-// whatsmeow withhold the ack (message.go:459-462), which this version, storing
-// no messages, has no use for. It is never removed: RemoveEventHandler would
-// deadlock from inside a handler (client.go:812-820), and the events of a
-// client the account no longer follows are dropped in handle.
+// handler returns the event handler of the account's client cli. It returns
+// true for every event but a message that could not be stored (see receive).
+// False is not free: it stops the dispatch to the handlers after it, such as a
+// pairing's QR channel (client.go:989-993), and makes whatsmeow withhold the ack
+// (message.go:459-462). A QR channel takes no interest in messages (qrchan.go:136-200),
+// so what that costs is the one message, which is meant. It is never removed:
+// RemoveEventHandler would deadlock from inside a handler (client.go:812-820),
+// and the events of a client the account no longer follows are dropped in
+// handle.
+//
+// It runs on whatsmeow's goroutines, one stanza at a time per client, and
+// whatsmeow holds its handler lock while it does (client.go:980-990): it makes
+// no call to WhatsApp, and holds mu for nothing but the account's own state.
 func (m *Manager) handler(a *account, cli *whatsmeow.Client) func(any) bool {
-	return func(evt any) bool {
-		m.handle(a, cli, evt)
-		return true
-	}
+	return func(evt any) bool { return m.handle(a, cli, evt) }
 }
 
-func (m *Manager) handle(a *account, cli *whatsmeow.Client, evt any) {
+func (m *Manager) handle(a *account, cli *whatsmeow.Client, evt any) bool {
+	switch e := evt.(type) {
+	case *events.Message:
+		return m.receive(a, cli, e)
+	case *events.JoinedGroup:
+		m.groupNamed(a, cli, e.JID, e.Name)
+		return true
+	case *events.GroupInfo:
+		if e.Name != nil {
+			m.groupNamed(a, cli, e.JID, e.Name.Name)
+		}
+		return true
+	}
 	// Close cancels ctx before Disconnect, so each socket drops as if the
 	// server closed it and whatsmeow sends Disconnected (client.go:599-603):
 	// a false reconnecting per account.
 	if m.ctx.Err() != nil {
-		return
-	}
-	if e, ok := evt.(*events.Message); ok {
-		if n := e.Message.GetProtocolMessage().GetHistorySyncNotification(); n != nil {
-			m.log.Debug("history sync ignored: history is not stored yet", "account", a.nick, "type", n.GetSyncType().String(), "chunk", n.GetChunkOrder())
-		}
-		return
+		return true
 	}
 	m.mu.Lock()
 	if cli != a.owner() {
 		m.mu.Unlock()
-		return
+		return true
 	}
 	if e, ok := evt.(*events.PushNameSetting); ok {
 		a.info.PushName = e.Action.GetName()
 		m.mu.Unlock()
-		return
+		return true
 	}
 	old := a.info
 	a.info = next(a.info, evt, time.Now())
@@ -350,6 +392,10 @@ func (m *Manager) handle(a *account, cli *whatsmeow.Client, evt any) {
 	if cur.Status != old.Status || cur.Reason != old.Reason {
 		m.log.Info("account status", "account", a.nick, "status", cur.Status, "reason", cur.Reason)
 	}
+	if _, ok := evt.(*events.Connected); ok {
+		m.startGroupSync(a, cli)
+	}
+	return true
 }
 
 // connect connects cli in the background once the client globals are
