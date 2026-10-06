@@ -417,7 +417,10 @@ func TestLinkQRSilence(t *testing.T) {
 		f := newFixture(t)
 		fn := &fakeNet{}
 		m := f.start(t, fn.network(readyGlobals()))
-		m.qrSilence = silence
+		// Link draws the image before it answers, which under the race detector
+		// takes a good deal longer than the silence of the other subtest: the
+		// window must be well above that, or the silence ends the pairing first.
+		m.qrSilence = 20 * silence
 		res := linkQRAsync(context.Background(), m, "fresh")
 		eventually(t, "the pairing", func() bool { return qrCount(fn) == 1 })
 		fn.qr(t, 0).ch <- code("2@one", 10*time.Millisecond) // the only one, and then nothing
