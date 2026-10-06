@@ -73,8 +73,8 @@ func TestGlobalsWaitForVersion(t *testing.T) {
 
 func TestDeviceNames(t *testing.T) {
 	for _, tc := range []struct{ goos, device, pairCode string }{
-		{"windows", "Claude (Windows)", "Chrome (Windows)"},
-		{"linux", "Claude (Linux)", "Chrome (Linux)"},
+		{"windows", "Claude, Windows", "Chrome (Windows)"},
+		{"linux", "Claude, Linux", "Chrome (Linux)"},
 		{"darwin", "Claude", "Chrome (Linux)"},
 		{"", "Claude", "Chrome (Linux)"},
 	} {

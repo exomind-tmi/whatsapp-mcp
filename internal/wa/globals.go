@@ -15,12 +15,14 @@ import (
 )
 
 // deviceName is the name the phone shows for us under Linked devices, a
-// default the user can rename on the phone.
+// default the user can rename on the phone. The phone writes it in brackets
+// after the platform type ("Google Chrome (Claude, Windows)"), so it has none
+// of its own.
 func deviceName() string { return deviceNameFor(runtime.GOOS) }
 
 func deviceNameFor(goos string) string {
 	if name := osName(goos); name != "" {
-		return "Claude (" + name + ")"
+		return "Claude, " + name
 	}
 	return "Claude"
 }
