@@ -50,7 +50,7 @@ func (m *Manager) qrTicket(ctx context.Context, nick string, s *pairSession) (Li
 	if st.State != pairCode {
 		return LinkTicket{}, m.abort(ctx, s, "")
 	}
-	png, err := qr.PNG(st.Code)
+	png, err := qr.PNG(st.Code, qr.Chat)
 	if err != nil {
 		m.log.Warn("draw the QR code", "account", nick, "err", err) // not the code
 		return LinkTicket{}, m.abort(ctx, s, drawFailed)

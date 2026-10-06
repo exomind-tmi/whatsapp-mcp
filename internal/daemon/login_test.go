@@ -306,7 +306,7 @@ func TestLoginState(t *testing.T) {
 	if img.Bounds().Empty() {
 		t.Error("the image is empty")
 	}
-	want, _ := qr.PNG(waCode)
+	want, _ := qr.PNG(waCode, qr.Page)
 	if !bytes.Equal(raw, want) {
 		t.Error("the image is not the code's")
 	}

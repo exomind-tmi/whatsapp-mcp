@@ -364,7 +364,7 @@ func TestManageAccountsAddRemoveReportErrors(t *testing.T) {
 // qrPNG is a real QR image: the one the daemon draws for a code.
 func qrPNG(t *testing.T) []byte {
 	t.Helper()
-	data, err := qr.PNG("2@aGVsbG8sIHdvcmxk,c2VjcmV0,a2V5,YWR2")
+	data, err := qr.PNG("2@aGVsbG8sIHdvcmxk,c2VjcmV0,a2V5,YWR2", qr.Chat)
 	if err != nil {
 		t.Fatal(err)
 	}

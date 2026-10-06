@@ -33,7 +33,7 @@ func linkQR(t *testing.T, m *Manager, nick string) linkResult {
 // would draw it, and that it is a whole PNG image.
 func requireQRImage(t *testing.T, data []byte, content string) {
 	t.Helper()
-	want, err := qr.PNG(content)
+	want, err := qr.PNG(content, qr.Chat)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestLinkQR(t *testing.T) {
 	// The ticket is the image, and the end of that code's life: 60 s from the
 	// first code, and not the end of the QR window, which is for a pairing code.
 	requireQRImage(t, tk.QRPNG, "2@secretcode")
-	if other, _ := qr.PNG("2@othercode"); bytes.Equal(tk.QRPNG, other) {
+	if other, _ := qr.PNG("2@othercode", qr.Chat); bytes.Equal(tk.QRPNG, other) {
 		t.Error("the image does not depend on the code")
 	}
 	if tk.LoginURL != "" || tk.PairCode != "" || tk.Reconnecting {

@@ -233,7 +233,7 @@ func TestTransportErrorRetry(t *testing.T) {
 // the client as the daemon made it, the image byte for byte; and the argument
 // reaches the daemon.
 func TestShimForwardsTheQRImage(t *testing.T) {
-	data, err := qr.PNG("2@aGVsbG8sIHdvcmxk,c2VjcmV0,a2V5,YWR2")
+	data, err := qr.PNG("2@aGVsbG8sIHdvcmxk,c2VjcmV0,a2V5,YWR2", qr.Chat)
 	if err != nil {
 		t.Fatal(err)
 	}

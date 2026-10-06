@@ -109,7 +109,7 @@ type stateJSON struct {
 func (h *loginHandler) writeState(w http.ResponseWriter, nick string, st wa.LoginState) {
 	out := stateJSON{State: st.State, Reason: st.Reason, Hint: st.Hint}
 	if st.Code != "" {
-		png, err := qr.PNG(st.Code)
+		png, err := qr.PNG(st.Code, qr.Page)
 		if err != nil {
 			h.log.Warn("draw the QR code", "account", nick, "err", err) // not the code
 			http.Error(w, "internal error", http.StatusInternalServerError)
