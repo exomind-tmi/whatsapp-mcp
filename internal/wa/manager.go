@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -67,6 +70,20 @@ type network struct {
 	// connects that read them are, so that a test's network takes the lock of its
 	// own around the write and the reads.
 	deleteDevice func(*whatsmeow.Client, context.Context) error
+
+	// What the history worker asks of the client (see history.go): its files call no
+	// method of the client but through these. The first three reach WhatsApp.
+	// parseWebMessage does not, it only reads the client's own ids, but it is a
+	// method too, and a seam keeps the rule simple.
+	//
+	// downloadHistory has whatsmeow's own signature, the flag included: true makes
+	// the call store the LID pairs and the push names of the blob before it returns,
+	// where false leaves that to a goroutine of its own (message.go:819-823), and
+	// the worker files each chat by what the store knows.
+	downloadHistory    func(cli *whatsmeow.Client, ctx context.Context, n *waE2E.HistorySyncNotification, synchronousStorage bool) (*waHistorySync.HistorySync, error)
+	deleteHistoryMedia func(cli *whatsmeow.Client, ctx context.Context, n *waE2E.HistorySyncNotification) error
+	historyReceipt     func(cli *whatsmeow.Client, ctx context.Context, id types.MessageID) error
+	parseWebMessage    func(cli *whatsmeow.Client, chat types.JID, msg *waWeb.WebMessageInfo) (*events.Message, error)
 }
 
 var liveNetwork = network{
@@ -79,6 +96,20 @@ var liveNetwork = network{
 	retryStep:    2 * time.Second, // whatsmeow's own (client.go:634)
 	deleteDevice: func(cli *whatsmeow.Client, ctx context.Context) error { return cli.Store.Delete(ctx) },
 	joinedGroups: (*whatsmeow.Client).GetJoinedGroups,
+
+	downloadHistory: (*whatsmeow.Client).DownloadHistorySync,
+	// The blob is ours once it is stored, and whatsmeow's own loop deletes it from the
+	// server with these very arguments (message.go:736); with the manual download
+	// nothing else does.
+	deleteHistoryMedia: func(cli *whatsmeow.Client, ctx context.Context, n *waE2E.HistorySyncNotification) error {
+		return cli.DeleteMedia(ctx, whatsmeow.MediaHistory, n.GetDirectPath(), n.GetFileEncSHA256(), n.GetEncHandle())
+	},
+	// What whatsmeow sends for each announcement unless DisableManualHistorySyncReceipt
+	// is set (message.go:899-905), which newClient does.
+	historyReceipt: func(cli *whatsmeow.Client, ctx context.Context, id types.MessageID) error {
+		return cli.SendProtocolMessageReceipt(ctx, id, types.ReceiptTypeHistorySync)
+	},
+	parseWebMessage: (*whatsmeow.Client).ParseWebMessage,
 }
 
 // Manager owns the WhatsApp client of every account and keeps each one's
@@ -100,6 +131,12 @@ type Manager struct {
 	writeWait  time.Duration // how long the handler of a message waits for archive.db
 	groupsWait time.Duration // the fetch of an account's groups and the write of their names
 	now        func() time.Time
+
+	// The history worker's limits (see history.go).
+	historyChunk    int           // messages in a transaction
+	historyWait     time.Duration // the download of one notification
+	historyRetry    time.Duration // the pause after a failed import, doubled by each failure up to historyRetryMax
+	historyRetryMax time.Duration
 
 	// ctx is every client's BackgroundEventCtx: keepalive and whatsmeow's
 	// reconnects run on it (client.go:500-502, 583-584). It ends on Close alone,
@@ -142,6 +179,13 @@ type account struct {
 	removeHint string  // what remove tells once the device is gone: kept for a remove that has to be repeated
 
 	syncingGroups bool // a goroutine is fetching the names of the account's groups (see startGroupSync)
+
+	// What the history worker keeps (see history.go): the worker that is running, and
+	// when the next import may start after a failed one. The pause is the account's,
+	// not the worker's: a worker that ends with the connection and starts again with
+	// it must not find it over.
+	history     *historyWorker
+	historyNext time.Time
 }
 
 // newAccount is an account with no device.
@@ -190,6 +234,11 @@ func newManager(ctx context.Context, cfg Config, net network) (*Manager, error) 
 		groupsWait: groupsWait,
 		now:        time.Now,
 		accounts:   map[string]*account{},
+
+		historyChunk:    historyChunk,
+		historyWait:     historyWait,
+		historyRetry:    historyRetry,
+		historyRetryMax: historyRetryMax,
 	}
 	m.ctx, m.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	if err := m.load(ctx); err != nil {
@@ -395,6 +444,14 @@ func (m *Manager) handle(a *account, cli *whatsmeow.Client, evt any) bool {
 	if _, ok := evt.(*events.Connected); ok {
 		m.startGroupSync(a, cli)
 	}
+	// The history that is waiting, from before the connection was lost or from the
+	// last run of the daemon, can be imported again.
+	switch evt.(type) {
+	case *events.Connected, *events.KeepAliveRestored:
+		if cur.Status == StatusConnected {
+			m.startHistory(a)
+		}
+	}
 	return true
 }
 
@@ -483,6 +540,7 @@ func (m *Manager) Accounts(ctx context.Context) []AccountInfo {
 	for _, s := range sizes {
 		size[s.Nick] = s
 	}
+	stuck := m.stuckHistory(ctx, sizes) // before mu: it reads archive.db
 	m.mu.Lock()
 	out := make([]AccountInfo, 0, len(m.accounts))
 	for _, a := range m.accounts {
@@ -492,6 +550,9 @@ func (m *Manager) Accounts(ctx context.Context) []AccountInfo {
 			info.LoginPending = true
 		}
 		info.Chats, info.Messages = size[a.nick].Chats, size[a.nick].Messages
+		if s, ok := stuck[a.nick]; ok {
+			info = withStuckHistory(info, s)
+		}
 		out = append(out, info)
 	}
 	m.mu.Unlock()

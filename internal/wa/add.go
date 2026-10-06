@@ -289,6 +289,7 @@ func (m *Manager) admit(ctx context.Context, nick string, kind pairKind, user st
 				m.wg.Add(1) // under mu and not closed, as track does
 				a.sess, a.pcli = s, s.cli
 				a.info = with(a.info, StatusLinking, "", time.Time{})
+				m.stopHistoryLocked(a) // the client an import in flight reads with is not the account's now
 				if kind != kindPage {
 					m.nonces.revoke(nick)
 				}

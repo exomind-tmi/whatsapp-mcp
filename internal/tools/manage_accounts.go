@@ -171,10 +171,16 @@ func withQRImage(out ManageOut, png []byte) (*mcp.CallToolResult, ManageOut, err
 // link add has handed out is not re-linked: another add ends that link, and the
 // page of the link is what starts the linking. A pairing that is running has
 // nothing to be told: it is no problem, and the add that began it said how to
-// follow it and when to start it again.
+// follow it and when to start it again. Nor can any call make up for history
+// that could not be imported, which the reason of a connected account says: only
+// the user is to be told.
 func repairStep(a wa.AccountInfo, now time.Time) string {
 	call := "manage-accounts action=add account_id=" + a.Nick
 	switch a.Status {
+	case wa.StatusConnected, wa.StatusReconnecting:
+		if a.HistoryStuck > 0 {
+			return "tell the user that part of the older messages of " + a.Nick + " could not be imported (see reason); the daemon log has the details"
+		}
 	case wa.StatusLinking:
 		if a.LoginPending {
 			return "open the login_url that add returned for " + a.Nick + " (in Claude Code, which has no browser, call " + call +

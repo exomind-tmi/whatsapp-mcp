@@ -96,22 +96,12 @@ func (m *Manager) receive(a *account, cli *whatsmeow.Client, e *events.Message) 
 		}
 	}()
 
-	// The message as it was sent, wrappers on: whatsmeow has taken them off
-	// e.Message (UnwrapRaw) and kept only a flag of each, the view-once one among
-	// them, which Classify reads off the wrapper itself. For a message of a
-	// resend from the phone (ParseWebMessage) an edit comes as the edit's content
-	// under the original's id, and only the raw message still says that it is one.
-	// A message that was never unwrapped has only Message.
-	msg := e.RawMessage
-	if msg == nil {
-		msg = e.Message
-	}
-	op := Classify(e.Info, msg).NoLaterThan(m.now())
+	op := opOf(e, m.now())
 	switch op.Kind {
 	case OpSkip:
 		return true
 	case OpHistoryNotif:
-		return m.queueHistory(a, e.Info.ID, op.Notif)
+		return m.queueHistory(a, cli, e.Info.ID, op.Notif)
 	}
 	if err := m.record(a, cli, e.Info, op); err != nil {
 		// What failed, not what was said: no text, no JID.
@@ -119,6 +109,26 @@ func (m *Manager) receive(a *account, cli *whatsmeow.Client, e *events.Message) 
 		return false
 	}
 	return true
+}
+
+// opOf is what a message event means for the archive, for the live handler and for
+// the history worker alike (which parses the phone's history into the same events,
+// ParseWebMessage), so that a message is read the same way whichever way it came.
+//
+// The message is as it was sent, wrappers on: whatsmeow has taken them off
+// e.Message (UnwrapRaw) and kept only a flag of each, the view-once one among
+// them, which Classify reads off the wrapper itself. For a message of a resend from
+// the phone (ParseWebMessage) an edit comes as the edit's content under the
+// original's id, and only the raw message still says that it is one: ParseWebMessage
+// keeps it in RawMessage (client.go:1053-1062), and that is what Classify reads, so
+// the edit is not mistaken for the original sent again. A message that was never
+// unwrapped has only Message.
+func opOf(e *events.Message, now time.Time) Op {
+	msg := e.RawMessage
+	if msg == nil {
+		msg = e.Message
+	}
+	return Classify(e.Info, msg).NoLaterThan(now)
 }
 
 // refusedMessage is what the log says of a message the archive did not take. A
@@ -146,7 +156,12 @@ func (m *Manager) panicked(what string, a *account, r any) {
 // gone, and the history it names with it: the first one after a link carries
 // the whole bootstrap inline (message.go:786-787), the announcement is the
 // history itself. Queued twice, it is one row.
-func (m *Manager) queueHistory(a *account, msgID string, n *waE2E.HistorySyncNotification) bool {
+//
+// Once it is kept the phone is told so (ackHistory) and the worker that imports it
+// is woken (startHistory). The calls to WhatsApp that these make are not made on
+// whatsmeow's goroutine, which this is on: each has a goroutine of its own, as
+// whatsmeow's own receipt has (message.go:899-905).
+func (m *Manager) queueHistory(a *account, cli *whatsmeow.Client, msgID string, n *waE2E.HistorySyncNotification) bool {
 	if msgID == "" {
 		return true // WhatsApp gives every message an id; there is nothing to key the row by
 	}
@@ -161,6 +176,8 @@ func (m *Manager) queueHistory(a *account, msgID string, n *waE2E.HistorySyncNot
 		return false
 	}
 	m.log.Debug("history sync queued", "account", a.nick, "type", n.GetSyncType().String(), "chunk", n.GetChunkOrder())
+	m.ackHistory(a, cli, msgID)
+	m.startHistory(a)
 	return true
 }
 
@@ -195,11 +212,24 @@ func (m *Manager) record(a *account, cli *whatsmeow.Client, info types.MessageIn
 // writes is then in the chat's final place from the start, and not moved after
 // it, and an edit or a revoke meets the message it is about there.
 func apply(t *archive.Tx, account string, op Op, chat Chat) error {
-	if pn, lid, ok := chat.Merge(); ok {
-		if err := t.MergeChat(account, pn, lid); err != nil {
-			return err
-		}
+	if err := mergeChat(t, account, chat); err != nil {
+		return err
 	}
+	return writeOp(t, account, op, chat)
+}
+
+// mergeChat brings what the chat has under its phone JID over to its LID, if it has
+// both. The history worker, which writes many messages of a chat in one transaction,
+// does it once for them and then only writes.
+func mergeChat(t *archive.Tx, account string, chat Chat) error {
+	if pn, lid, ok := chat.Merge(); ok {
+		return t.MergeChat(account, pn, lid)
+	}
+	return nil
+}
+
+// writeOp is apply without the merge: the operation, and the chat's own row.
+func writeOp(t *archive.Tx, account string, op Op, chat Chat) error {
 	var err error
 	upd := archive.ChatUpd{Account: account, JID: chat.JID, PN: chat.PN, Name: op.ChatName, IsGroup: chat.IsGroup}
 	switch op.Kind {

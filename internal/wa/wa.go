@@ -30,6 +30,12 @@ type AccountInfo struct {
 	Chats     int // archived chats and messages of the account
 	Messages  int
 
+	// HistoryStuck is how many history sync notifications the account's worker has
+	// given up on, having failed MaxAttempts times or failed in a way that more tries
+	// would not change: that part of the history is missing, and the account's
+	// Reason says so unless it has a worse one.
+	HistoryStuck int
+
 	// LoginPending is set with the status linking when no pairing is running: add
 	// has handed out a login link and its page has not been opened. Only Accounts
 	// sets it.

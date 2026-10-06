@@ -47,6 +47,10 @@ type fakeNet struct {
 	// the tests of connecting, pairing and removing compare whole.
 	groups func(cli *whatsmeow.Client, ctx context.Context) ([]*types.GroupInfo, error)
 
+	// history is what the history worker's seams answer with (history_fake_test.go);
+	// nil for a test that has no history: they then fail.
+	history *fakeHistory
+
 	mu          sync.Mutex
 	calls       []string   // "connect <phone>" once Connect returns, "disconnect <phone>", "logout <phone>", "qr <phone>", "pairphone <phone>"
 	qrs         []fakeQR   // one per GetQRChannel
@@ -206,6 +210,10 @@ func (f *fakeNet) network(g *waGlobals) network {
 			}
 			return code, nil
 		},
+		downloadHistory:    f.downloadHistory,
+		deleteHistoryMedia: f.deleteHistoryMedia,
+		historyReceipt:     f.historyReceipt,
+		parseWebMessage:    f.parseWebMessage,
 	}
 }
 

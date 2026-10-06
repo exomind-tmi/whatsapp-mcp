@@ -5,6 +5,8 @@ import (
 	"errors"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -33,5 +35,12 @@ func offlineNetwork() network {
 		joinedGroups: func(*whatsmeow.Client, context.Context) ([]*types.GroupInfo, error) { return nil, errOffline },
 		retryStep:    live.retryStep,
 		deleteDevice: live.deleteDevice, // store.db is ours
+
+		downloadHistory: func(*whatsmeow.Client, context.Context, *waE2E.HistorySyncNotification, bool) (*waHistorySync.HistorySync, error) {
+			return nil, errOffline
+		},
+		deleteHistoryMedia: func(*whatsmeow.Client, context.Context, *waE2E.HistorySyncNotification) error { return errOffline },
+		historyReceipt:     func(*whatsmeow.Client, context.Context, types.MessageID) error { return errOffline },
+		parseWebMessage:    live.parseWebMessage, // reads the client's own ids, no network
 	}
 }

@@ -115,6 +115,7 @@ func (m *Manager) beginRemove(ctx context.Context, nick string) (*account, error
 		}
 		if prev == nil {
 			a.removing = true
+			m.stopHistoryLocked(a) // an import in flight is of no use now, and would fight the delete for the writer
 			m.nonces.revoke(nick)
 			m.mu.Unlock()
 			return a, nil
@@ -161,6 +162,9 @@ func (m *Manager) removeTaken(ctx context.Context, a *account) (string, error) {
 // must be held. admit compares the count to learn that the row it has seen in
 // archive.db may be gone.
 func (m *Manager) dropAccount(nick string) {
+	if a := m.accounts[nick]; a != nil {
+		m.stopHistoryLocked(a)
+	}
 	delete(m.accounts, nick)
 	m.removed++
 }
