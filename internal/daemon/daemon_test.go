@@ -21,6 +21,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/exomind-tmi/whatsapp-mcp/internal/archive"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/client"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/testutil"
@@ -251,23 +252,19 @@ func TestRunLifecycle(t *testing.T) {
 	}
 }
 
-// TestRunIssuesLoginLink: the add tool of the real daemon, which reaches no
-// WhatsApp, hands out a link to its own port, and the mux answers the link's
-// path with no token. The page opens without starting a pairing; its poll does.
-func TestRunIssuesLoginLink(t *testing.T) {
-	h := home.Home{Dir: testutil.TempDir(t)}
-	if err := h.Ensure(); err != nil {
-		t.Fatal(err)
-	}
+// runDaemon runs the real daemon in-process, without WhatsApp, until the test ends,
+// and returns what it wrote to daemon.json and a context that the test may use.
+func runDaemon(t *testing.T, h home.Home) (home.DaemonInfo, context.Context) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- Run(ctx, h, "v0.1.0", WithoutWhatsApp()) }()
-	defer func() {
+	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
 			t.Error(err)
 		}
-	}()
+	})
 	var info home.DaemonInfo
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		var err error
@@ -279,6 +276,18 @@ func TestRunIssuesLoginLink(t *testing.T) {
 		}
 	}
 	testutil.WaitForLog(t, h.Log("daemon.log"), "never reaches WhatsApp") // it reaches no WhatsApp
+	return info, ctx
+}
+
+// TestRunIssuesLoginLink: the add tool of the real daemon, which reaches no
+// WhatsApp, hands out a link to its own port, and the mux answers the link's
+// path with no token. The page opens without starting a pairing; its poll does.
+func TestRunIssuesLoginLink(t *testing.T) {
+	h := home.Home{Dir: testutil.TempDir(t)}
+	if err := h.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	info, ctx := runDaemon(t, h)
 
 	cs, err := client.Connect(ctx, h, info.Port, "v0.1.0")
 	if err != nil {
@@ -386,5 +395,109 @@ func TestRunManagerFails(t *testing.T) {
 	}
 	if _, err := os.Stat(h.DaemonJSON()); !os.IsNotExist(err) {
 		t.Fatalf("daemon.json left behind: %v", err)
+	}
+}
+
+// seedArchive makes an archive.db in the home with an account that has a chat with
+// Bob in it: three messages, the last of which Bob deleted. The daemon opens it as
+// it finds it, as it does after a restart.
+func seedArchive(t *testing.T, h home.Home) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := archive.Open(h.ArchiveDB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.AddAccount(ctx, "personal"); err != nil {
+		t.Fatal(err)
+	}
+	const bob = "70000000100@s.whatsapp.net"
+	at := time.Unix(1_700_000_000, 0)
+	err = db.Tx(ctx, func(tx *archive.Tx) error {
+		for i, text := range []string{"rent for the garage is due", "I will pay the rent tomorrow", "never mind the rent"} {
+			sender := bob
+			if i == 1 {
+				sender = "70000000001@s.whatsapp.net" // ours
+			}
+			if err := tx.Upsert(archive.Row{Account: "personal", Chat: bob, ID: fmt.Sprintf("M%d", i+1), Sender: sender, FromMe: i == 1,
+				TS: at.Add(time.Duration(i) * time.Second), Text: text, Raw: []byte("raw")}); err != nil {
+				return err
+			}
+		}
+		if err := tx.Revoke(archive.Revoke{Account: "personal", Chat: bob, ID: "M3", RevokedAt: at.Add(time.Minute)}); err != nil {
+			return err
+		}
+		return tx.TouchChat(archive.ChatUpd{Account: "personal", JID: bob, Name: "Bob", LastMessageTS: at.Add(2 * time.Second)})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunServesTheReadTools: the daemon hands the tools the archive it opened and
+// the Manager it built, so that a client of /mcp reads what is in archive.db: the
+// chats, the messages of one by a phone number (the Manager says which chat that
+// is), the window around one, and a search by a person's name (the Manager says
+// which addresses that is). The account has no device, so the answers carry a note
+// that it is not connected, and still come.
+func TestRunServesTheReadTools(t *testing.T) {
+	h := home.Home{Dir: testutil.TempDir(t)}
+	if err := h.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	seedArchive(t, h)
+	info, ctx := runDaemon(t, h)
+	cs, err := client.Connect(ctx, h, info.Port, "v0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	call := func(tool string, args map[string]any, out any) {
+		t.Helper()
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: args})
+		if err != nil || res.IsError {
+			t.Fatalf("%s %v: %v %v", tool, args, err, tools.ResultText(res))
+		}
+		if err := json.Unmarshal([]byte(tools.ResultText(res)), out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const note = "account personal is needs_link: this is the archive up to when it was last connected; " +
+		"to receive new messages: manage-accounts action=add account_id=personal — re-link, the message archive is kept"
+
+	var chats tools.ChatsOut
+	call("list-chats", nil, &chats)
+	if len(chats.Chats) != 1 || chats.Chats[0].Name != "Bob" || chats.Chats[0].Phone != "+70000000100" || chats.Chats[0].Account != "personal" ||
+		len(chats.Notes) != 1 || chats.Notes[0] != note {
+		t.Errorf("list-chats = %+v", chats)
+	}
+
+	var page tools.MessagesOut
+	call("get-messages", map[string]any{"chat": "+7 000 000 0100"}, &page)
+	if len(page.Messages) != 3 || page.Messages[0].ID != "M1" || !page.Messages[2].Revoked || page.Messages[1].SenderName != "" || len(page.Notes) != 1 {
+		t.Errorf("get-messages = %+v", page)
+	}
+
+	var window tools.ContextOut
+	call("get-message-context", map[string]any{"chat": page.Chat, "message_id": "M2", "before": 1, "after": 1}, &window)
+	if len(window.Messages) != 3 || !window.Messages[1].Target || window.Messages[1].ID != "M2" {
+		t.Errorf("get-message-context = %+v", window)
+	}
+
+	var found tools.SearchOut
+	call("search-messages", map[string]any{"query": "rent", "sender": "bob"}, &found)
+	if len(found.Results) != 2 || found.Results[0].ID != "M3" || found.Results[1].ID != "M1" || found.Results[1].ChatName != "Bob" {
+		t.Errorf("search-messages = %+v, want the messages of Bob that have the word, the newest first", found)
+	}
+
+	// What goes wrong is told to the agent, and the daemon goes on.
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "search-messages", Arguments: map[string]any{"query": "ab"}})
+	if err != nil || !res.IsError || !strings.Contains(tools.ResultText(res), "query too short") {
+		t.Errorf("a query that is too short: %v %v", err, res)
+	}
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "get-messages", Arguments: map[string]any{"chat": "Bob"}})
+	if err != nil || !res.IsError || !strings.Contains(tools.ResultText(res), "not a chat") {
+		t.Errorf("a chat that is not one: %v %v", err, res)
 	}
 }

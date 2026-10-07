@@ -58,13 +58,16 @@ func shimSession(t *testing.T, h home.Home, version string) *mcp.ClientSession {
 	t.Helper()
 	f := newForwarder(h, version, slog.New(slog.DiscardHandler))
 	t.Cleanup(f.close)
-	local := &toolstest.WA{}
+	local, localArchive := &toolstest.WA{}, &toolstest.Archive{}
 	t.Cleanup(func() {
 		if calls := local.Calls(); len(calls) != 0 {
 			t.Errorf("shim ran tools locally: %v", calls)
 		}
+		if localArchive.Asked() {
+			t.Errorf("shim read an archive locally: %+v", localArchive.Queries())
+		}
 	})
-	s := tools.NewServer(version, tools.Deps{WA: local})
+	s := tools.NewServer(version, tools.Deps{WA: local, Archive: localArchive})
 	s.AddReceivingMiddleware(f.intercept)
 	st, ct := mcp.NewInMemoryTransports()
 	ctx := context.Background()
@@ -94,7 +97,7 @@ func TestShimForwardsToDaemon(t *testing.T) {
 
 	// tools/list is answered by the shim itself.
 	list, err := cs.ListTools(context.Background(), nil)
-	if err != nil || len(list.Tools) != 2 {
+	if err != nil || len(list.Tools) != 6 {
 		t.Fatalf("tools/list: %v %+v", err, list)
 	}
 
@@ -128,6 +131,40 @@ func TestShimForwardsToDaemon(t *testing.T) {
 	}
 }
 
+// readCalls are a valid call of each read tool.
+var readCalls = map[string]map[string]any{
+	"list-chats":          {},
+	"get-messages":        {"chat": "+7 999 123-45-67"},
+	"get-message-context": {"chat": "+7 999 123-45-67", "message_id": "M1"},
+	"search-messages":     {"query": "hello"},
+}
+
+// TestShimForwardsTheReadTools: each of the read tools reaches the daemon, which
+// reads its archive, and what it answers (the structured content, the notes, the
+// isError of a message that is not there) comes back as it was.
+func TestShimForwardsTheReadTools(t *testing.T) {
+	h := startDaemon(t, "v0.1.0")
+	cs := shimSession(t, h, "v0.1.0") // fails the test if the shim reads anything itself
+	if res, text := callText(t, cs, "manage-accounts", map[string]any{"action": "add", "account_id": "personal"}); res.IsError {
+		t.Fatal(text)
+	}
+	for name, args := range readCalls {
+		res, text := callText(t, cs, name, args)
+		if name == "get-message-context" {
+			if !res.IsError || !strings.Contains(text, "no such message") {
+				t.Errorf("%s: isError=%v %s, want the daemon's answer for a message that is not there", name, res.IsError, text)
+			}
+			continue
+		}
+		if res.IsError || res.StructuredContent == nil || !strings.Contains(text, "account personal is linking") {
+			t.Errorf("%s via daemon: isError=%v structured=%v %s", name, res.IsError, res.StructuredContent != nil, text)
+		}
+	}
+	if res, text := callText(t, cs, "search-messages", map[string]any{"query": "ab"}); !res.IsError || !strings.Contains(text, "query too short") {
+		t.Errorf("a query that is too short: isError=%v %s", res.IsError, text)
+	}
+}
+
 func TestShimForwardsEveryListedTool(t *testing.T) {
 	h := startDaemon(t, "v0.1.0")
 	cs := shimSession(t, h, "v0.1.0")
@@ -137,9 +174,10 @@ func TestShimForwardsEveryListedTool(t *testing.T) {
 	}
 	for _, tool := range list.Tools {
 		// shimSession fails the test if any call is handled by the shim itself.
-		for _, action := range []string{"list", "add", "remove"} {
-			cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool.Name,
-				Arguments: map[string]any{"action": action, "account_id": "personal"}})
+		for _, args := range []map[string]any{
+			{"action": "list"}, {"action": "add", "account_id": "personal"}, {"action": "remove", "account_id": "personal"}, readCalls[tool.Name],
+		} {
+			cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool.Name, Arguments: args})
 		}
 	}
 }
@@ -174,7 +212,7 @@ func fakeDaemon(t *testing.T, version string, breaks int32, w tools.WA) (home.Ho
 	const token = "test-token"
 	os.WriteFile(h.TokenFile(), []byte(token), 0o600)
 
-	server := tools.NewServer(version, tools.Deps{WA: w})
+	server := tools.NewServer(version, tools.Deps{WA: w, Archive: &toolstest.Archive{}})
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	var calls atomic.Int32
@@ -208,10 +246,12 @@ func TestTransportErrorRetry(t *testing.T) {
 		breaks    int32
 		wantCalls int32
 		wantOK    bool
+		wantMsg   string // what a failed call is told with
 	}{
-		{"write tool is never repeated", false, 1, 1, false},
-		{"read tool is repeated once", true, 1, 2, true},
-		{"read tool is repeated only once", true, 2, 2, false},
+		{"write tool is never repeated", false, 1, 1, false, msgUnconfirmed},
+		{"read tool is repeated once", true, 1, 2, true, ""},
+		// It reads, so nothing may have taken effect: the agent is not told to check.
+		{"read tool is repeated only once", true, 2, 2, false, msgReadFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, calls := fakeDaemon(t, "v0.1.0", tc.breaks, &toolstest.WA{})
@@ -223,11 +263,85 @@ func TestTransportErrorRetry(t *testing.T) {
 				t.Fatal(err)
 			}
 			text := tools.ResultText(res)
-			if res.IsError == tc.wantOK || (!tc.wantOK && !strings.HasPrefix(text, msgUnconfirmed)) {
+			if res.IsError == tc.wantOK || (!tc.wantOK && !strings.HasPrefix(text, tc.wantMsg)) {
 				t.Errorf("isError=%v %s", res.IsError, text)
+			}
+			if tc.wantMsg == msgReadFailed && (strings.Contains(text, "for a send") || strings.Contains(text, "took effect")) {
+				t.Errorf("a read that failed twice is told in the words of a send: %s", text)
 			}
 			if got := calls.Load(); got != tc.wantCalls {
 				t.Errorf("tools/call reached the daemon %d times, want %d", got, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestShimRepeatsOnlyWhatReads: the shim repeats a call that a broken connection
+// cut off once, and only for a tool that reads (tools.ReadOnly, which it uses
+// itself): a read tool is repeated, and one that changes anything is not, for it
+// may have taken effect.
+func TestShimRepeatsOnlyWhatReads(t *testing.T) {
+	accounts := &toolstest.WA{Accs: []wa.AccountInfo{{Nick: "personal", Status: wa.StatusConnected}}}
+	for _, tc := range []struct {
+		tool      string
+		args      map[string]any
+		wantCalls int32
+		wantOK    bool
+	}{
+		{"list-chats", readCalls["list-chats"], 2, true},
+		{"get-messages", readCalls["get-messages"], 2, true},
+		{"get-message-context", map[string]any{"chat": "+7 999 123-45-67", "message_id": "M1"}, 2, false}, // the answer is an error, of the daemon
+		{"search-messages", readCalls["search-messages"], 2, true},
+		{"manage-accounts", map[string]any{"action": "list"}, 1, false},
+		{"remove-account", map[string]any{"account_id": "personal", "confirm": "personal"}, 1, false},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			h, calls := fakeDaemon(t, "v0.1.0", 1, accounts)
+			f := newForwarder(h, "v0.1.0", slog.New(slog.DiscardHandler)) // with the real ReadOnly
+			defer f.close()
+			raw, _ := json.Marshal(tc.args)
+			res, err := f.call(context.Background(), &mcp.CallToolParamsRaw{Name: tc.tool, Arguments: raw})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := tools.ResultText(res)
+			if got := calls.Load(); got != tc.wantCalls {
+				t.Errorf("tools/call reached the daemon %d times, want %d", got, tc.wantCalls)
+			}
+			if unconfirmed := strings.HasPrefix(text, msgUnconfirmed); unconfirmed != (tc.wantCalls == 1) {
+				t.Errorf("unconfirmed=%v: isError=%v %s", unconfirmed, res.IsError, text)
+			}
+			if tc.wantOK && res.IsError {
+				t.Errorf("the repeated call failed: %s", text)
+			}
+		})
+	}
+}
+
+// TestAReadThatFailsTwiceIsNotToldAsASend: a read tool that the connection cut off
+// twice has changed nothing, so the agent is told to repeat it and not, as for a send,
+// to check whether it took effect.
+func TestAReadThatFailsTwiceIsNotToldAsASend(t *testing.T) {
+	accounts := &toolstest.WA{Accs: []wa.AccountInfo{{Nick: "personal", Status: wa.StatusConnected}}}
+	for name, args := range readCalls {
+		t.Run(name, func(t *testing.T) {
+			h, calls := fakeDaemon(t, "v0.1.0", 2, accounts)
+			f := newForwarder(h, "v0.1.0", slog.New(slog.DiscardHandler)) // with the real ReadOnly
+			defer f.close()
+			raw, _ := json.Marshal(args)
+			res, err := f.call(context.Background(), &mcp.CallToolParamsRaw{Name: name, Arguments: raw})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := tools.ResultText(res)
+			if calls.Load() != 2 || !res.IsError {
+				t.Fatalf("calls %d, isError %v: %s", calls.Load(), res.IsError, text)
+			}
+			if !strings.HasPrefix(text, msgReadFailed) || strings.Contains(text, "for a send") || strings.Contains(text, "took effect") {
+				t.Errorf("a read that failed twice is told in the words of a send: %s", text)
+			}
+			if !strings.Contains(text, "nothing was changed") {
+				t.Errorf("the agent is not told that nothing was changed: %s", text)
 			}
 		})
 	}
@@ -287,7 +401,7 @@ func daemonSession(t *testing.T, w tools.WA) *mcp.ClientSession {
 	t.Helper()
 	st, ct := mcp.NewInMemoryTransports()
 	ctx := context.Background()
-	if _, err := tools.NewServer("v0.1.0", tools.Deps{WA: w}).Connect(ctx, st, nil); err != nil {
+	if _, err := tools.NewServer("v0.1.0", tools.Deps{WA: w, Archive: &toolstest.Archive{}}).Connect(ctx, st, nil); err != nil {
 		t.Fatal(err)
 	}
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, ct, nil)

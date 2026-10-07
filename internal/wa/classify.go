@@ -4,6 +4,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -133,7 +134,7 @@ func Classify(info types.MessageInfo, msg *waE2E.Message) Op {
 		return Op{}
 	}
 	chat, ok := receivedChat(info)
-	if !ok || info.ID == "" || info.Category == "peer" {
+	if !ok || !plausibleID(info.ID) || info.Category == "peer" {
 		return Op{}
 	}
 	sender := info.Sender.ToNonAD()
@@ -225,7 +226,7 @@ func editOp(op Op, info types.MessageInfo, sender types.JID, p *waE2E.ProtocolMe
 	id := p.GetKey().GetID()
 	edited, _ := unwrap(p.GetEditedMessage())
 	c := contentOf(edited)
-	if id == "" || !c.ok {
+	if !plausibleID(id) || !c.ok {
 		return Op{}
 	}
 	op.Kind = OpEdit
@@ -240,11 +241,11 @@ func editOp(op Op, info types.MessageInfo, sender types.JID, p *waE2E.ProtocolMe
 // matters only for the stub that a message not archived yet gets.
 func revokeOp(op Op, info types.MessageInfo, sender types.JID, p *waE2E.ProtocolMessage) Op {
 	key := p.GetKey()
-	if key.GetID() == "" {
+	if !plausibleID(key.GetID()) {
 		return Op{}
 	}
 	author, fromMe := sender, info.IsFromMe
-	if part, err := types.ParseJID(key.GetParticipant()); !key.GetFromMe() && err == nil && part.User != "" {
+	if part, err := types.ParseJID(key.GetParticipant()); !key.GetFromMe() && err == nil && plausibleUser(part) {
 		author, fromMe = part.ToNonAD(), false
 	}
 	op.Kind = OpRevoke
@@ -318,7 +319,7 @@ func contentOf(m *waE2E.Message) content {
 		return content{ok: true, text: m.GetConversation()}
 	case m.GetExtendedTextMessage().GetText() != "":
 		x := m.GetExtendedTextMessage()
-		return content{ok: true, text: x.GetText(), quoted: x.GetContextInfo().GetStanzaID()}
+		return content{ok: true, text: x.GetText(), quoted: quotedID(x.GetContextInfo())}
 	case m.GetImageMessage() != nil:
 		x := m.GetImageMessage()
 		return media("image", x.GetMimetype(), x.GetCaption(), x.GetFileLength(), x.GetContextInfo(), x.GetViewOnce())
@@ -382,10 +383,48 @@ func businessText(m *waE2E.Message) string {
 }
 
 func media(kind, mime, caption string, size uint64, ci *waE2E.ContextInfo, viewOnce bool) content {
+	if len(mime) > maxMimeLen {
+		mime = "" // not a media type: made up, and as long as its sender liked
+	}
 	return content{
 		ok: true, text: caption, mediaType: kind, mime: mime, size: clampSize(size),
-		quoted: ci.GetStanzaID(), viewOnce: viewOnce,
+		quoted: quotedID(ci), viewOnce: viewOnce,
 	}
+}
+
+// What the sender of a message chooses, and the archive keeps and a read tool shows as
+// it is, is kept to what it can honestly be. An id that is a paragraph, a media type
+// that is a megabyte, or an author that is a sentence would let a message put words in
+// the field of an identifier, or make a result as big as its sender likes. The ids of
+// WhatsApp are 20 to 40 characters, and a media type is at most 127 + "/" + 127
+// (RFC 6838).
+const (
+	maxIDLen   = 128
+	maxMimeLen = 255
+)
+
+// plausibleID tells whether a message id can be one: not empty, not longer than an id
+// of WhatsApp is, and in one piece, with no space or control character in it.
+func plausibleID(id string) bool {
+	return id != "" && len(id) <= maxIDLen && !strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
+}
+
+// plausibleUser tells whether j can be a person of WhatsApp: a number or a LID, which
+// are digits. The key of a deletion is written by whoever sent the deletion, and it
+// names the author of the message that the stub is made for.
+func plausibleUser(j types.JID) bool {
+	if j.Server != types.DefaultUserServer && j.Server != types.HiddenUserServer || j.User == "" {
+		return false
+	}
+	return strings.Trim(j.User, "0123456789") == ""
+}
+
+// quotedID is the id of the message that ci answers, if it is a plausible one.
+func quotedID(ci *waE2E.ContextInfo) string {
+	if id := ci.GetStanzaID(); plausibleID(id) {
+		return id
+	}
+	return ""
 }
 
 // clampSize is a file length as the archive's signed integer: one that does not

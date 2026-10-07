@@ -19,6 +19,10 @@ const (
 		"(Claude Desktop: Quit from the tray icon and open it again)."
 	msgUnconfirmed = "the connection to the whatsapp-mcp daemon broke during the call, so it is unknown whether it took effect " +
 		"(for a send: the message may or may not have been sent). Check the result, e.g. with get-messages, before retrying. Error: "
+	// msgReadFailed is for a tool that only reads, which the shim has repeated once
+	// already: nothing was changed, so there is nothing to check.
+	msgReadFailed = "the connection to the whatsapp-mcp daemon broke twice during the call; the call only reads, so nothing was changed: " +
+		"repeat it, and if it fails again stop and tell the user. Error: "
 )
 
 // forwarder sends every tools/call to the daemon over one cached MCP session.
@@ -104,6 +108,9 @@ func (f *forwarder) call(ctx context.Context, p *mcp.CallToolParamsRaw) (*mcp.Ca
 		f.log.Warn("transport error", "tool", p.Name, "attempt", attempt, "err", err)
 		f.drop(ctx, sess)
 		if attempt > 0 || !f.readOnly(p.Name) {
+			if f.readOnly(p.Name) {
+				return errorResult(msgReadFailed + err.Error()), nil
+			}
 			return errorResult(msgUnconfirmed + err.Error()), nil
 		}
 	}

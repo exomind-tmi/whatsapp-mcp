@@ -1,5 +1,409 @@
 [
   {
+    "annotations": {
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Read the messages around a WhatsApp message"
+    },
+    "description": "Read the messages around one message, oldest first, the message itself marked `target: true`: what was said before and after it. `chat` and `message_id` are those of a result of get-messages or search-messages. `before` and `after` are how many messages to show on each side (5 by default, at most 20). A message with `revoked: true` was deleted by its sender: do not quote it. A long text is cut (`truncated`): over 4000 characters, and sooner if the result is big.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "description": "account id from manage-accounts list; may be left out if only one account is linked or the chat is in one account only",
+          "type": "string"
+        },
+        "after": {
+          "description": "how many messages to show after it; 5 by default, at most 20",
+          "type": [
+            "null",
+            "integer"
+          ]
+        },
+        "before": {
+          "description": "how many messages to show before it; 5 by default, at most 20",
+          "type": [
+            "null",
+            "integer"
+          ]
+        },
+        "chat": {
+          "description": "chat id, as in the message",
+          "type": "string"
+        },
+        "message_id": {
+          "description": "id of the message, as in the message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chat",
+        "message_id"
+      ],
+      "type": "object"
+    },
+    "name": "get-message-context",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "chat": {
+          "type": "string"
+        },
+        "messages": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "chat": {
+                "type": "string"
+              },
+              "edited_at": {
+                "type": "string"
+              },
+              "from_me": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "additionalProperties": false,
+                "properties": {
+                  "mime": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": "integer"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": [
+                  "null",
+                  "object"
+                ]
+              },
+              "quoted_id": {
+                "type": "string"
+              },
+              "revoked": {
+                "type": "boolean"
+              },
+              "revoked_at": {
+                "type": "string"
+              },
+              "sender": {
+                "type": "string"
+              },
+              "sender_name": {
+                "type": "string"
+              },
+              "target": {
+                "type": "boolean"
+              },
+              "text": {
+                "type": [
+                  "null",
+                  "string"
+                ]
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "account",
+              "chat",
+              "id",
+              "sender",
+              "from_me",
+              "at",
+              "text"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        }
+      },
+      "required": [
+        "account",
+        "chat",
+        "messages"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Read WhatsApp messages"
+    },
+    "description": "Read the messages of one chat, oldest first: the newest `limit` (50 by default, at most 200) unless you page back. `chat` is a chat id from list-chats, or a phone number such as +7 999 123-45-67. To read further back, call again with `before` set to the `next_before` of the result (it is absent when there is nothing older); `before` and `after` also take a time in ISO 8601 with an offset, e.g. 2026-10-07T18:30:00+03:00, never \"now\" or a relative time. Each message has `account`, `chat` and `id`, and `sender_name` when the sender's name is known. A message with `revoked: true` was deleted by its sender: do not quote it. A long text is cut (`truncated`): over 4000 characters, and sooner if the result is big. Media is described (`media`), not returned. An account that is not connected is read from its archive, and `notes` says so.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "description": "account id from manage-accounts list; may be left out if only one account is linked or the chat is in one account only",
+          "type": "string"
+        },
+        "after": {
+          "description": "read nothing older than this: a time in ISO 8601 with an offset",
+          "type": "string"
+        },
+        "before": {
+          "description": "read the messages older than this: the next_before of a previous result, or a time in ISO 8601 with an offset",
+          "type": "string"
+        },
+        "chat": {
+          "description": "chat id from list-chats, or a phone number such as +7 999 123-45-67",
+          "type": "string"
+        },
+        "limit": {
+          "description": "how many messages to return; 50 by default, at most 200",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "chat"
+      ],
+      "type": "object"
+    },
+    "name": "get-messages",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "chat": {
+          "type": "string"
+        },
+        "messages": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "chat": {
+                "type": "string"
+              },
+              "edited_at": {
+                "type": "string"
+              },
+              "from_me": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "additionalProperties": false,
+                "properties": {
+                  "mime": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": "integer"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": [
+                  "null",
+                  "object"
+                ]
+              },
+              "quoted_id": {
+                "type": "string"
+              },
+              "revoked": {
+                "type": "boolean"
+              },
+              "revoked_at": {
+                "type": "string"
+              },
+              "sender": {
+                "type": "string"
+              },
+              "sender_name": {
+                "type": "string"
+              },
+              "text": {
+                "type": [
+                  "null",
+                  "string"
+                ]
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "account",
+              "chat",
+              "id",
+              "sender",
+              "from_me",
+              "at",
+              "text"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        },
+        "next_before": {
+          "type": "string"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        }
+      },
+      "required": [
+        "account",
+        "chat",
+        "messages"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "List WhatsApp chats"
+    },
+    "description": "List the chats in the archive, the most recently active first. Each has `account`, `chat` (the chat id: pass it to get-messages, get-message-context and search-messages), `name`, `phone` (when known), `is_group` and `last_message_at`. Start here to find a chat: `query` finds chats by part of the name or of the phone number. Covers all accounts unless `account` is given (an account id or a list of them). `limit` is 50 by default, at most 200.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "description": "account id, or a list of account ids; all accounts by default",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "string",
+            "array"
+          ]
+        },
+        "limit": {
+          "description": "how many chats to return; 50 by default, at most 200",
+          "type": "integer"
+        },
+        "query": {
+          "description": "keep the chats whose name or phone number contains this; case does not matter",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "list-chats",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "chats": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "chat": {
+                "type": "string"
+              },
+              "is_group": {
+                "type": "boolean"
+              },
+              "last_message_at": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "phone": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "account",
+              "chat",
+              "is_group"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        }
+      },
+      "required": [
+        "chats"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "description": "Manage linked WhatsApp accounts.\n- `list` — accounts with status (`connected`, `reconnecting`, `needs_link`, `replaced`, `client_outdated`, `error`) and archive size.\n- `add` — link a NEW account, or RE-LINK an existing one: call `add` with the SAME `account_id`. Re-linking keeps the whole message archive. Use it when status is `needs_link` or the device was removed on the phone (new link: without `phone` a local QR page, with `phone` an 8-character pairing code), or when status is `replaced`/`error` (reconnects with the existing keys, no QR). To link: in Claude Code (terminal, SSH, headless) use `phone`. In Cowork or Claude Desktop link by the QR code shown in the chat: do not call `add` yet, first ask the user to get the phone ready (WhatsApp → Settings → Linked devices → Link a device, camera open) and to say when it is ready; then call `add` with `qr_image=true`. Without `qr_image`, `add` returns a link to a page with the QR for a browser: use it only if the user prefers that or cannot see images. To reconnect a broken account use `add` with the same `account_id`, never the `remove-account` tool: it deletes the archive.",
     "inputSchema": {
       "additionalProperties": false,
@@ -143,6 +547,167 @@
       },
       "required": [
         "status"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Search WhatsApp messages"
+    },
+    "description": "Search the text of the messages, newest first: what was written, the caption of a media, and the file name of a document sent without a caption (other file names are not searched). `query` is words that a message must all contain, in any order; a part of a word is enough. A word needs 3 or more characters: shorter ones are ignored, and a query with none is refused. Covers all accounts unless `account` is given (an account id or a list of them). `chat` (a chat id or a phone number), `sender` (a phone number, a JID or part of a name) and `after` and `before` (times in ISO 8601 with an offset, e.g. 2026-10-07T18:30:00+03:00, never \"now\" or a relative time) narrow it. `limit` is 20 by default, at most 100. Each result has `account`, `chat`, `chat_name` and `id`: to read around a result pass its `account`, `chat` and `id` (as `message_id`) to get-message-context. A result with `revoked: true` was deleted by its sender: do not quote it. A long text is cut (`truncated`): over 4000 characters, and sooner if the result is big. An account that is not connected is searched in its archive, and `notes` says so.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "description": "account id, or a list of account ids; all accounts by default",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "string",
+            "array"
+          ]
+        },
+        "after": {
+          "description": "only messages from this time on: a time in ISO 8601 with an offset",
+          "type": "string"
+        },
+        "before": {
+          "description": "only messages older than this: a time in ISO 8601 with an offset",
+          "type": "string"
+        },
+        "chat": {
+          "description": "only this chat: a chat id from list-chats, or a phone number",
+          "type": "string"
+        },
+        "limit": {
+          "description": "how many results to return; 20 by default, at most 100",
+          "type": "integer"
+        },
+        "query": {
+          "description": "words that a message must all contain, in any order; a part of a word is enough; at least one word of 3 or more characters",
+          "type": "string"
+        },
+        "sender": {
+          "description": "only messages of this person: a phone number, a JID, or part of the name they are known by",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "search-messages",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        },
+        "results": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "chat": {
+                "type": "string"
+              },
+              "chat_name": {
+                "type": "string"
+              },
+              "edited_at": {
+                "type": "string"
+              },
+              "from_me": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "media": {
+                "additionalProperties": false,
+                "properties": {
+                  "mime": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": "integer"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": [
+                  "null",
+                  "object"
+                ]
+              },
+              "quoted_id": {
+                "type": "string"
+              },
+              "revoked": {
+                "type": "boolean"
+              },
+              "revoked_at": {
+                "type": "string"
+              },
+              "sender": {
+                "type": "string"
+              },
+              "sender_name": {
+                "type": "string"
+              },
+              "text": {
+                "type": [
+                  "null",
+                  "string"
+                ]
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "account",
+              "chat",
+              "id",
+              "sender",
+              "from_me",
+              "at",
+              "text"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        }
+      },
+      "required": [
+        "results"
       ],
       "type": "object"
     }

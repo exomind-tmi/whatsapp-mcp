@@ -541,6 +541,22 @@ func (m *Manager) Accounts(ctx context.Context) []AccountInfo {
 		size[s.Nick] = s
 	}
 	stuck := m.stuckHistory(ctx, sizes) // before mu: it reads archive.db
+	out := m.Roster(ctx)
+	for i, info := range out {
+		info.Chats, info.Messages = size[info.Nick].Chats, size[info.Nick].Messages
+		if s, ok := stuck[info.Nick]; ok {
+			info = withStuckHistory(info, s)
+		}
+		out[i] = info
+	}
+	return out
+}
+
+// Roster is Accounts without the sizes of their archives and without what the
+// history queue says: the accounts and their statuses, from memory. Counting an
+// archive is a pass over all its messages, which a tool that only has to know which
+// accounts there are and whether each is connected should not make with every call.
+func (m *Manager) Roster(context.Context) []AccountInfo {
 	m.mu.Lock()
 	out := make([]AccountInfo, 0, len(m.accounts))
 	for _, a := range m.accounts {
@@ -548,10 +564,6 @@ func (m *Manager) Accounts(ctx context.Context) []AccountInfo {
 		if info.Status == StatusNeedsLink && m.nonces.pending(a.nick) {
 			info = with(info, StatusLinking, loginPendingReason, time.Time{})
 			info.LoginPending = true
-		}
-		info.Chats, info.Messages = size[a.nick].Chats, size[a.nick].Messages
-		if s, ok := stuck[a.nick]; ok {
-			info = withStuckHistory(info, s)
 		}
 		out = append(out, info)
 	}

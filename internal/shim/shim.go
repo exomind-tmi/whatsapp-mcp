@@ -26,7 +26,7 @@ func Run(ctx context.Context, h home.Home, version string, t mcp.Transport) erro
 	log.Info("shim started", "version", version)
 
 	f := newForwarder(h, version, log)
-	s := tools.NewServer(version, tools.Deps{WA: tools.HandledByDaemon{}})
+	s := tools.NewServer(version, tools.Deps{WA: tools.HandledByDaemon{}, Archive: tools.HandledByDaemon{}})
 	s.AddReceivingMiddleware(f.intercept)
 
 	// Warm up: start or hand over the daemon while the client initializes.

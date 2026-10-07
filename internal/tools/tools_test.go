@@ -63,10 +63,11 @@ func TestManageAccountsSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Tools) != 2 || list.Tools[0].Name != "manage-accounts" || list.Tools[1].Name != "remove-account" {
-		t.Fatalf("tools = %+v", list.Tools)
+	i := slices.IndexFunc(list.Tools, func(tl *mcp.Tool) bool { return tl.Name == "manage-accounts" })
+	if i < 0 {
+		t.Fatalf("no manage-accounts in %+v", list.Tools)
 	}
-	tool := list.Tools[0]
+	tool := list.Tools[i]
 	if tool.Description != manageAccountsDescription {
 		t.Error("the listed description differs from the one in the code")
 	}

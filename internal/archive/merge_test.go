@@ -263,6 +263,75 @@ func TestMergeChatKeepsTheOrderOfOneSecond(t *testing.T) {
 	}
 }
 
+// TestMergeChatKeepsAPositionInTheChat: a position in a chat that a client holds (the
+// cursor of a page) is still one after the number's chat is merged into the LID's, or the
+// messages of the second the cursor is in, that are on the other side of it, are lost.
+func TestMergeChatKeepsAPositionInTheChat(t *testing.T) {
+	db := openWith(t, "alice")
+	run(t, db,
+		up(pnMsg("e", 5, "epsilon")),
+		up(pnMsg("a", 10, "alpha")), up(pnMsg("b", 10, "beta")), up(pnMsg("c", 10, "gamma")), up(pnMsg("d", 10, "delta")))
+	newest, err := db.Messages(bg, MsgQuery{Account: "alice", Chat: pnChat, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(newest.Messages); got != "c,d" {
+		t.Fatalf("the newest page is %s", got)
+	}
+
+	run(t, db, merge("alice", pnChat, lidChat))
+
+	older, err := db.Messages(bg, MsgQuery{Account: "alice", Chat: lidChat, Limit: 10, Before: newest.Next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(older.Messages); got != "e,a,b" {
+		t.Errorf("the page before the position, after the merge, is %q: want \"e,a,b\" (a and b were of the same second as c)", got)
+	}
+	checkFTS(t, db)
+}
+
+// TestMergeChatKeepsTheIDsOfWhatItMoves: a message that is only on the number's side
+// has the same id (and so the same cursor) in the LID's chat; one that is on both sides
+// is the LID side's, which is the one that stays.
+func TestMergeChatKeepsTheIDsOfWhatItMoves(t *testing.T) {
+	db := openWith(t, "alice")
+	run(t, db,
+		up(pnMsg("only-pn", 10, "number side")), up(pnMsg("both", 20, "on both")),
+		up(lidMsg("both", 20, "on both")), up(lidMsg("only-lid", 30, "lid side")))
+	cursors := func(chat string) map[string]Cursor {
+		page, err := db.Messages(bg, MsgQuery{Account: "alice", Chat: chat, Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]Cursor{}
+		for _, m := range page.Messages {
+			out[m.ID] = m.Cursor()
+		}
+		return out
+	}
+	pn, lid := cursors(pnChat), cursors(lidChat)
+
+	run(t, db, merge("alice", pnChat, lidChat))
+
+	after := cursors(lidChat)
+	if len(after) != 3 {
+		t.Fatalf("%d messages after the merge, want 3: %v", len(after), after)
+	}
+	if after["only-pn"] != pn["only-pn"] {
+		t.Errorf("the message of the number's side has the cursor %v, had %v", after["only-pn"], pn["only-pn"])
+	}
+	for _, id := range []string{"both", "only-lid"} {
+		if after[id] != lid[id] {
+			t.Errorf("%s has the cursor %v, had %v on the LID's side", id, after[id], lid[id])
+		}
+	}
+	if n := count(t, db, `SELECT count(*) FROM messages WHERE chat_jid = '`+pnChat+`'`); n != 0 {
+		t.Errorf("%d messages are left under the number", n)
+	}
+	checkFTS(t, db)
+}
+
 // TestMergeChatLeavesOthersAlone: other chats of the account, and the same
 // chat of another account, are not touched.
 func TestMergeChatLeavesOthersAlone(t *testing.T) {

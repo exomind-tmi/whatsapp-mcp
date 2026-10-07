@@ -127,7 +127,7 @@ func run(ctx context.Context, h home.Home, version string, log *slog.Logger, o o
 		Handler: newMux(muxDeps{
 			version: version,
 			token:   token,
-			server:  tools.NewServer(version, tools.Deps{WA: accounts}),
+			server:  tools.NewServer(version, tools.Deps{WA: accounts, Archive: db, Log: log}),
 			stop:    stop,
 			log:     log,
 			login:   accounts,
