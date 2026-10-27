@@ -16,9 +16,9 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/exomind-tmi/mcp-plugin-kit/proc"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/archive"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
-	"github.com/exomind-tmi/whatsapp-mcp/internal/proc"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/tools"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/wa"
 )

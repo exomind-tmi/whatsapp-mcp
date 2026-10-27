@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/exomind-tmi/mcp-plugin-kit/proc"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
-	"github.com/exomind-tmi/whatsapp-mcp/internal/proc"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/testutil"
 )
 

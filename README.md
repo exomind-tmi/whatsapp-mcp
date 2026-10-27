@@ -69,11 +69,18 @@ act as your linked device; it is protected by your user account's file permissio
 
 Go 1.27, no CGO. Builds for Windows and Linux (x64).
 
+Building, packing and releasing the plugin is done by
+[mcp-plugin-kit](https://github.com/exomind-tmi/mcp-plugin-kit): the launchers in
+`plugin/scripts/` are rendered from its templates, and CI and release call its workflows.
+Settings of this server are in `mcp-plugin.env`. Run the kit's scripts from a checkout of it
+(`../mcp-plugin-kit` below):
+
 ```
-go test ./...
-scripts/build.sh      # dist/windows-amd64, dist/linux-amd64
-scripts/dev-install.sh # a plugin pinned to a local build, for testing
-scripts/notices.sh    # regenerate THIRD_PARTY_NOTICES.md after changing go.mod
+go test ./...          # tests/launcher needs the kit: MCP_PLUGIN_KIT=../mcp-plugin-kit
+../mcp-plugin-kit/scripts/build.sh        # dist/windows-amd64, dist/linux-amd64
+../mcp-plugin-kit/scripts/dev-install.sh  # a plugin pinned to a local build, for testing
+../mcp-plugin-kit/scripts/render.sh       # render the launchers again after changing mcp-plugin.env
+scripts/notices.sh     # regenerate THIRD_PARTY_NOTICES.md after changing go.mod
 ```
 
 `whatsapp-mcp status` and `whatsapp-mcp stop` show and stop the daemon; the binary of the

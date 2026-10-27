@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/exomind-tmi/whatsapp-mcp/internal/proc"
+	"github.com/exomind-tmi/mcp-plugin-kit/proc"
 )
 
 // LaunchDaemon is the middle process of a double spawn. It starts the daemon
