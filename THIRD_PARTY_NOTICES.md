@@ -16,6 +16,7 @@ license texts, and the source code of the components under GPL and MPL, as
 | [github.com/coder/websocket](https://pkg.go.dev/github.com/coder/websocket@v1.8.15?tab=licenses) | v1.8.15 | ISC |
 | [github.com/dustin/go-humanize](https://pkg.go.dev/github.com/dustin/go-humanize@v1.0.1?tab=licenses) | v1.0.1 | MIT |
 | [github.com/elliotchance/orderedmap/v3](https://pkg.go.dev/github.com/elliotchance/orderedmap/v3@v3.1.0?tab=licenses) | v3.1.0 | MIT |
+| [github.com/exomind-tmi/mcp-plugin-kit](https://pkg.go.dev/github.com/exomind-tmi/mcp-plugin-kit@v0.1.0?tab=licenses) | v0.1.0 | BSD-0-Clause |
 | [github.com/google/jsonschema-go/jsonschema](https://pkg.go.dev/github.com/google/jsonschema-go@v0.4.3?tab=licenses) | v0.4.3 | MIT |
 | [github.com/google/uuid](https://pkg.go.dev/github.com/google/uuid@v1.6.0?tab=licenses) | v1.6.0 | BSD-3-Clause |
 | [github.com/mattn/go-colorable](https://pkg.go.dev/github.com/mattn/go-colorable@v0.1.14?tab=licenses) | v0.1.14 | MIT |
@@ -39,7 +40,7 @@ license texts, and the source code of the components under GPL and MPL, as
 | [golang.org/x/net](https://pkg.go.dev/golang.org/x/net@v0.59.0?tab=licenses) | v0.59.0 | BSD-3-Clause |
 | [golang.org/x/oauth2](https://pkg.go.dev/golang.org/x/oauth2@v0.35.0?tab=licenses) | v0.35.0 | BSD-3-Clause |
 | [golang.org/x/sync](https://pkg.go.dev/golang.org/x/sync@v0.23.0?tab=licenses) | v0.23.0 | BSD-3-Clause |
-| [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys@v0.48.0?tab=licenses) | v0.48.0 | BSD-3-Clause |
+| [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys@v0.49.0?tab=licenses) | v0.49.0 | BSD-3-Clause |
 | [golang.org/x/text](https://pkg.go.dev/golang.org/x/text@v0.42.0?tab=licenses) | v0.42.0 | BSD-3-Clause |
 | [golang.org/x/time/rate](https://pkg.go.dev/golang.org/x/time@v0.15.0?tab=licenses) | v0.15.0 | BSD-3-Clause |
 | [google.golang.org/protobuf](https://pkg.go.dev/google.golang.org/protobuf@v1.36.12?tab=licenses) | v1.36.12 | BSD-3-Clause |

@@ -13,9 +13,9 @@ import (
 
 	"golang.org/x/mod/semver"
 
+	"github.com/exomind-tmi/mcp-plugin-kit/proc"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/client"
 	"github.com/exomind-tmi/whatsapp-mcp/internal/home"
-	"github.com/exomind-tmi/whatsapp-mcp/internal/proc"
 )
 
 const (
