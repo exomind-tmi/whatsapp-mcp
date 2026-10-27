@@ -439,11 +439,19 @@ func TestInvokeWebRequestFallback(t *testing.T) {
 }
 
 // The sh launcher parses release.json with sed, so it must accept exactly
-// what scripts/release-json.sh prints. Linux only: on Windows "bash" may be
-// the WSL stub, and launch.ps1 uses a real JSON parser anyway.
+// what the kit's scripts/release-json.sh prints. The kit is the checkout in
+// .mcp-plugin-kit (CI) or the directory in MCP_PLUGIN_KIT. Linux only: on
+// Windows "bash" may be the WSL stub, and launch.ps1 uses a real JSON parser anyway.
 func TestGeneratedReleaseJSON(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("sh launcher only")
+	}
+	kit := os.Getenv("MCP_PLUGIN_KIT")
+	if kit == "" {
+		kit = filepath.Join("..", "..", ".mcp-plugin-kit")
+	}
+	if _, err := os.Stat(filepath.Join(kit, "scripts", "release-json.sh")); err != nil {
+		t.Skipf("no mcp-plugin-kit checkout at %s (set MCP_PLUGIN_KIT)", kit)
 	}
 	t.Parallel()
 	f := newFixture(t)
@@ -456,9 +464,11 @@ func TestGeneratedReleaseJSON(t *testing.T) {
 	if err := os.WriteFile(windows, []byte("decoy"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", filepath.Join("..", "..", "scripts", "release-json.sh"), version,
+	cmd := exec.Command("bash", filepath.Join(kit, "scripts", "release-json.sh"), version,
 		"windows-amd64="+windows, "linux-amd64="+linux)
-	cmd.Env = append(os.Environ(), "RELEASE_URL_BASE="+f.srv.URL+"/download/"+version)
+	// The kit's scripts read mcp-plugin.env of the repository they run in.
+	cmd.Env = append(os.Environ(), "RELEASE_URL_BASE="+f.srv.URL+"/download/"+version,
+		"MCP_PLUGIN_ROOT="+filepath.Join("..", ".."))
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("release-json.sh: %v", err)
